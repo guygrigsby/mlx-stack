@@ -1,0 +1,17 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "mlx-stack"
+version         = "0.1.0"
+description     = "Worker shim + patches for mlx-stack"
+requires-python = ">=3.10"
+dependencies    = []   # mlx, mlx_lm, mlx_vlm assumed already installed in target venv
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["mlx_stack*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
