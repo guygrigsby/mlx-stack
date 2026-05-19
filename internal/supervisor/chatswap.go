@@ -197,3 +197,31 @@ func (c *ChatSwap) UpstreamModel(name string) string {
 
 // BaseURL is what the router proxies to.
 func (c *ChatSwap) BaseURL() string { return c.URL() }
+
+// Stop the current chat worker (if any) gracefully: SIGTERM, wait up to 30s
+// or ctx, then SIGKILL. Clears state. Safe to call when no worker is running.
+func (c *ChatSwap) Stop(ctx context.Context) error {
+	c.mu.Lock()
+	if c.current == nil {
+		c.mu.Unlock()
+		return nil
+	}
+	old := c.current
+	c.current = nil
+	c.state.CurrentProfile = ""
+	c.state.WorkerPID = 0
+	c.state.WorkerURL = ""
+	c.mu.Unlock()
+
+	_ = old.Signal("TERM")
+	select {
+	case <-old.Done():
+	case <-time.After(30 * time.Second):
+		_ = old.Signal("KILL")
+		<-old.Done()
+	case <-ctx.Done():
+		_ = old.Signal("KILL")
+		return ctx.Err()
+	}
+	return nil
+}

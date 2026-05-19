@@ -176,3 +176,24 @@ func TestChatSwap_UpstreamModelAndBaseURL(t *testing.T) {
 		t.Errorf("BaseURL: %q", cs.BaseURL())
 	}
 }
+
+func TestChatSwap_Stop(t *testing.T) {
+	cs, _ := newTestSwap(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	defer upstream.Close()
+	cs.upstreamURLOverride = upstream.URL
+
+	if err := cs.EnsureProfile(context.Background(), "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	st := cs.State()
+	if st.CurrentProfile != "" || st.WorkerPID != 0 {
+		t.Errorf("state not cleared: %+v", st)
+	}
+}
