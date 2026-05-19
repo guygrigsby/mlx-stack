@@ -6,8 +6,8 @@ INSTALL_DIR ?= $(HOME)/.local/bin
 
 build:
 	mkdir -p bin
-	go build $(GOFLAGS) -o bin/mlxd ./cmd/mlxd
-	go build $(GOFLAGS) -o bin/mlx  ./cmd/mlx
+	go build $(GOFLAGS) -o bin/mlxd    ./cmd/mlxd
+	go build $(GOFLAGS) -o bin/mlxctl  ./cmd/mlxctl
 
 fakemlx:
 	mkdir -p bin
@@ -23,7 +23,7 @@ test-py:
 
 install: build
 	mkdir -p $(INSTALL_DIR)
-	cp bin/mlxd bin/mlx $(INSTALL_DIR)/
+	cp bin/mlxd bin/mlxctl $(INSTALL_DIR)/
 	$(PYTHON_BIN) -m pip install -e ./python
 
 clean:
