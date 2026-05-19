@@ -184,3 +184,16 @@ func buildLauncherArgs(p config.Profile, host string, port int) []string {
 	}
 	return args
 }
+
+// UpstreamModel returns the absolute model path the upstream server expects
+// in the "model" field. Empty string if name not in profiles.
+func (c *ChatSwap) UpstreamModel(name string) string {
+	p, ok := c.profiles[name]
+	if !ok {
+		return ""
+	}
+	return p.Model
+}
+
+// BaseURL is what the router proxies to.
+func (c *ChatSwap) BaseURL() string { return c.URL() }

@@ -163,3 +163,16 @@ func freePort() (int, error) {
 	p, _ := strconv.Atoi(ps)
 	return p, nil
 }
+
+func TestChatSwap_UpstreamModelAndBaseURL(t *testing.T) {
+	cs, _ := newTestSwap(t)
+	if got := cs.UpstreamModel("p1"); got != "/tmp/p1" {
+		t.Errorf("UpstreamModel: %q", got)
+	}
+	if got := cs.UpstreamModel("ghost"); got != "" {
+		t.Errorf("UpstreamModel ghost: %q", got)
+	}
+	if !strings.Contains(cs.BaseURL(), "127.0.0.1:") {
+		t.Errorf("BaseURL: %q", cs.BaseURL())
+	}
+}
