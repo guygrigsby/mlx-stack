@@ -139,10 +139,6 @@ url            = "http://other-mac.lan:1236"
 upstream_model = "nomic-ai/nomic-embed-text-v1.5"
 ```
 
-To migrate from the legacy `~/.config/mlx.conf`:
-
-    mlxctl config migrate ~/.config/mlx.conf > ~/.config/mlx/config.toml
-
 ## Run
 
     mlxd run --config ~/.config/mlx/config.toml --log-dir ~/.logs/mlx
@@ -162,7 +158,6 @@ All commands take a backend name. For swap groups, both the group name (`chat`) 
     mlxctl chat "hello"           # send a chat request via the router
     mlxctl tags                   # list available models (calls /v1/models)
     mlxctl health                 # daemon liveness
-    mlxctl config migrate <path>  # convert legacy ~/.config/mlx.conf to TOML
     mlxctl config show            # print current TOML config
     mlxctl bootstrap [--path P]   # create a venv with mlx_lm + friends (fresh machines)
 

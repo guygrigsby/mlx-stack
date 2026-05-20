@@ -65,7 +65,7 @@ func usage() {
   chat "..."                send a chat request via the router
   tags                      list available models
   health                    daemon liveness
-  config migrate|show       config helpers
+  config show               print current TOML config
   bootstrap [--path P]      create a venv with mlx_lm + friends (fresh machines)`)
 }
 
