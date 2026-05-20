@@ -1,49 +1,166 @@
 # mlx-stack
 
-Single-daemon replacement for the multi-script MLX inference setup. See `docs/2026-05-19-mlx-stack-design.md` for the design.
+Single-daemon replacement for a multi-script MLX inference setup. One Go binary supervises any number of named MLX models (chat, vision, embedding, audio), exposes them as OpenAI-compatible HTTP endpoints, and hot-swaps members of a shared port. See `docs/2026-05-19-mlx-stack-design.md` and `docs/2026-05-19-mlx-stack-phase-8-unified-backends.md` for the design.
 
 ## Build
 
     make build
 
-Produces `bin/mlxd` and `bin/mlxctl`.
+Produces `bin/mlxd` (daemon) and `bin/mlxctl` (CLI).
 
 ## Test
 
     make test
 
-Runs Go unit tests + Python tests.
+Go unit + integration tests, Python patch tests, and e2e against a fake `mlx_lm.server`.
 
 ## Install
 
     make install
-
-Copies `bin/mlxd` and `bin/mlxctl` to `~/.local/bin` and installs the Python package editably into `~/venvs/mlx`.
-
-## Autostart on login (macOS)
-
-    make install-launchd
+    make install-launchd      # optional: autostart on login (macOS)
     launchctl load ~/Library/LaunchAgents/dev.grigsby.mlxd.plist
 
-To unload:
+## Config
 
-    launchctl unload ~/Library/LaunchAgents/dev.grigsby.mlxd.plist
-    make uninstall-launchd
+Every backend is one `[[backend]]` entry. `mode` is the only real distinction:
 
-mlxd writes its log to `~/.logs/mlx/mlxd-launchd.log` when run via launchd.
+- `mode = "swap"` — multiple members share a port; only one is loaded at a time. Use for chat-style models where the request's `model` field picks the active member.
+- `mode = "persistent"` — always-on, single worker.
+- `mode = "external"` — URL-only; mlxd just proxies to it.
 
-## Manual run
+Example `~/.config/mlx/config.toml`:
 
-    mlxd run --config ~/.config/mlx/config.toml
+```toml
+log_dir     = "~/.logs/mlx"
+models_root = "~/mlx-models"
+python_bin  = "~/venvs/mlx/bin/python"
+
+[router]
+host = "127.0.0.1"
+port = 1230
+extra_ports = [8080]
+
+[defaults.cache]
+limit_bytes        = 2_147_483_648
+clear_interval_sec = 60
+
+[defaults.watchdog]
+kv_headroom_bytes  = 8_000_000_000
+check_interval_sec = 30
+grace_sec          = 90
+
+[defaults.memlog]
+interval_sec = 300
+
+# Chat group: 1 port, 3 swappable models.
+[[backend]]
+name    = "valkyrie"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = 1234
+model   = "~/mlx-models/valkyrie"
+default = true
+
+[[backend]]
+name   = "scout"
+engine = "vlm"
+mode   = "swap"
+group  = "chat"
+host   = "127.0.0.1"
+port   = 1234
+model  = "~/mlx-models/scout"
+
+[[backend]]
+name        = "anubis"
+engine      = "lm"
+mode        = "swap"
+group       = "chat"
+host        = "127.0.0.1"
+port        = 1234
+model       = "~/mlx-models/anubis"
+draft_model = "~/mlx-models/anubis-draft"
+
+# Always-on tags model (VLM).
+[[backend]]
+name   = "qwen-tags"
+engine = "vlm"
+mode   = "persistent"
+host   = "127.0.0.1"
+port   = 1235
+model  = "~/mlx-models/qwen-tags"
+  [backend.watchdog]
+  kv_headroom_bytes = 4_000_000_000
+
+# Always-on embedding server.
+[[backend]]
+name   = "embed"
+engine = "embed"
+mode   = "persistent"
+host   = "127.0.0.1"
+port   = 1236
+model  = "nomic-ai/nomic-embed-text-v1.5"
+
+# Audio backends. mlx_audio.server multiplexes models per request.
+[[backend]]
+name   = "tts"
+engine = "audio"
+mode   = "persistent"
+host   = "127.0.0.1"
+port   = 1237
+
+[[backend]]
+name   = "kokoro"
+engine = "audio"
+mode   = "persistent"
+host   = "127.0.0.1"
+port   = 8880
+
+# External backend (mlxd just proxies):
+[[backend]]
+name           = "remote-embed"
+mode           = "external"
+url            = "http://other-mac.lan:1236"
+upstream_model = "nomic-ai/nomic-embed-text-v1.5"
+```
+
+To migrate from the legacy `~/.config/mlx.conf`:
+
+    mlxctl config migrate ~/.config/mlx.conf > ~/.config/mlx/config.toml
+
+## Run
+
+    mlxd run --config ~/.config/mlx/config.toml --log-dir ~/.logs/mlx
 
 ## CLI
 
-    mlxctl status           # show backend state
-    mlxctl monitor          # live-refresh status
-    mlxctl tail             # stream stderr events from all workers
-    mlxctl swap <profile>   # swap chat profile
-    mlxctl chat "..."       # send a chat request via the router
-    mlxctl tags             # list available models
-    mlxctl start chat       # start chat backend
-    mlxctl stop chat        # stop chat backend
-    mlxctl health           # daemon liveness check
+All commands take a backend name. For swap groups, both the group name (`chat`) and any member name (`valkyrie`, `scout`, `anubis`) resolve to the same group.
+
+    mlxctl status                 # table of every backend's state
+    mlxctl monitor                # status, refreshed every 500ms
+    mlxctl tail                   # stream structured stderr events from all workers
+    mlxctl tail?worker=qwen-tags  # filter to one worker
+    mlxctl start <name>           # load a backend (for swap: switch to it)
+    mlxctl stop <name>            # stop a backend
+    mlxctl restart <name>         # stop then start
+    mlxctl swap <name>            # alias for start
+    mlxctl chat "hello"           # send a chat request via the router
+    mlxctl tags                   # list available models (calls /v1/models)
+    mlxctl health                 # daemon liveness
+    mlxctl config migrate <path>  # convert legacy ~/.config/mlx.conf to TOML
+    mlxctl config show            # print current TOML config
+
+## HTTP surface
+
+OpenAI-compatible, all on the router port (default 1230):
+
+    POST /v1/chat/completions      # body's "model" field picks the backend
+    POST /v1/completions
+    POST /v1/embeddings
+    POST /v1/audio/speech
+    POST /v1/audio/transcriptions
+    GET  /v1/models                # aggregated catalog
+    GET  /health
+
+The admin socket at `~/.local/state/mlxd/admin.sock` exposes per-backend actions and a `/v1/logs/tail` SSE stream.
