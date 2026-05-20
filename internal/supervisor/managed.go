@@ -158,6 +158,17 @@ func (m *Managed) supervise() {
 	}
 }
 
+// Alias returns the configured alias for this managed backend.
+func (m *Managed) Alias() string { return m.opts.Alias }
+
+// UpstreamModel returns the absolute model path the upstream server expects
+// in the "model" field. Empty for audio backends (mlx_audio.server picks
+// per-request from its preloaded set).
+func (m *Managed) UpstreamModel() string { return m.opts.UpstreamModel }
+
+// BaseURL is what the router proxies to.
+func (m *Managed) BaseURL() string { return m.URL() }
+
 func (m *Managed) Stop(ctx context.Context) error {
 	if !m.running.CompareAndSwap(true, false) {
 		return nil

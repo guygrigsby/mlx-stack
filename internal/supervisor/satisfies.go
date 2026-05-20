@@ -6,6 +6,7 @@ import (
 )
 
 var (
-	_ router.ChatSwapper   = (*ChatSwap)(nil)
-	_ admin.ChatController = (*ChatSwap)(nil)
+	_ router.ChatSwapper    = (*ChatSwap)(nil)
+	_ admin.ChatController  = (*ChatSwap)(nil)
+	_ router.ManagedBackend = (*Managed)(nil)
 )
