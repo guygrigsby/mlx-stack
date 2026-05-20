@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -11,6 +13,10 @@ import (
 )
 
 func cmdTail(args []string) {
+	fs := flag.NewFlagSet("tail", flag.ExitOnError)
+	worker := fs.String("worker", "", "filter to events from a single worker (e.g. qwen-tags or chat[valkyrie])")
+	fs.Parse(args)
+
 	c := newClient()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -22,7 +28,12 @@ func cmdTail(args []string) {
 		cancel()
 	}()
 
-	rc, err := c.GetStream(ctx, "/v1/logs/tail")
+	path := "/v1/logs/tail"
+	if *worker != "" {
+		path += "?worker=" + url.QueryEscape(*worker)
+	}
+
+	rc, err := c.GetStream(ctx, path)
 	if err != nil {
 		notRunning()
 	}

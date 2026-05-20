@@ -140,7 +140,7 @@ All commands take a backend name. For swap groups, both the group name (`chat`) 
     mlxctl status                 # table of every backend's state
     mlxctl monitor                # status, refreshed every 500ms
     mlxctl tail                   # stream structured stderr events from all workers
-    mlxctl tail?worker=qwen-tags  # filter to one worker
+    mlxctl tail --worker qwen-tags  # filter to one worker
     mlxctl start <name>           # load a backend (for swap: switch to it)
     mlxctl stop <name>            # stop a backend
     mlxctl restart <name>         # stop then start
