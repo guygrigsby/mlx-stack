@@ -1,4 +1,4 @@
-.PHONY: build test test-go test-py install clean fakemlx
+.PHONY: build test test-go test-py install clean fakemlx install-launchd uninstall-launchd
 
 GOFLAGS    ?=
 PYTHON_BIN ?= $(HOME)/venvs/mlx/bin/python
@@ -28,3 +28,23 @@ install: build
 
 clean:
 	rm -rf bin
+
+LAUNCHD_PLIST = $(HOME)/Library/LaunchAgents/dev.grigsby.mlxd.plist
+
+install-launchd: install
+	@mkdir -p $(HOME)/Library/LaunchAgents $(HOME)/.logs/mlx
+	@sed -e "s|{{INSTALL_DIR}}|$(INSTALL_DIR)|g" -e "s|{{HOME}}|$(HOME)|g" \
+		deploy/dev.grigsby.mlxd.plist.template \
+		> $(LAUNCHD_PLIST)
+	@echo "Installed launchd plist at $(LAUNCHD_PLIST)"
+	@echo "Load:   launchctl load $(LAUNCHD_PLIST)"
+	@echo "Unload: launchctl unload $(LAUNCHD_PLIST)"
+
+uninstall-launchd:
+	@if [ -f $(LAUNCHD_PLIST) ]; then \
+		launchctl unload $(LAUNCHD_PLIST) 2>/dev/null || true; \
+		rm $(LAUNCHD_PLIST); \
+		echo "Removed $(LAUNCHD_PLIST)"; \
+	else \
+		echo "No plist at $(LAUNCHD_PLIST)"; \
+	fi

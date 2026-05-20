@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.grigsby.mlxd</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{INSTALL_DIR}}/mlxd</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>{{HOME}}/.config/mlx/config.toml</string>
+    <string>--log-json</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/.logs/mlx/mlxd-launchd.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/.logs/mlx/mlxd-launchd.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>{{HOME}}</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:{{HOME}}/.local/bin</string>
+  </dict>
+</dict>
+</plist>
