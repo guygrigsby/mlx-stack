@@ -30,6 +30,14 @@ func main() {
 		cmdRestart(os.Args[2:])
 	case "health":
 		cmdHealth(os.Args[2:])
+	case "monitor":
+		cmdMonitor(os.Args[2:])
+	case "tail":
+		cmdTail(os.Args[2:])
+	case "chat":
+		cmdChat(os.Args[2:])
+	case "tags":
+		cmdTagsList(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -42,10 +50,14 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: mlxctl <subcommand>
   status                       show current backend state
+  monitor                      live-refresh status (every 500ms)
+  tail                         stream structured stderr events from all workers
   swap <profile>               swap chat profile
   start chat                   start chat backend (default profile)
   stop chat                    stop chat backend
   restart chat                 restart chat backend
+  chat "..."                   send a chat request via the router
+  tags                         list available models
   health                       daemon liveness check`)
 }
 

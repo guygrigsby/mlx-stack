@@ -61,3 +61,33 @@ func TestClient_ConnectionRefused(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestClient_GetStream(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "admin.sock")
+	ln, _ := net.Listen("unix", sock)
+	defer ln.Close()
+
+	go (&http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		w.Write([]byte("data: a\n\ndata: b\n\n"))
+		flusher.Flush()
+	})}).Serve(ln)
+
+	c := New(sock)
+	rc, err := c.GetStream(context.Background(), "/v1/logs/tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	buf := make([]byte, 128)
+	n, _ := rc.Read(buf)
+	body := string(buf[:n])
+	if !strings.Contains(body, "data: a") {
+		t.Errorf("body: %q", body)
+	}
+}

@@ -35,6 +35,22 @@ func (c *Client) PostJSON(ctx context.Context, path string, body []byte) ([]byte
 	return c.do(ctx, "POST", path, body)
 }
 
+func (c *Client) GetStream(ctx context.Context, path string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://mlxd"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("admin GET %s: %d", path, resp.StatusCode)
+	}
+	return resp.Body, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
