@@ -1,0 +1,1979 @@
+#!/usr/bin/env zsh
+# mlx — manage local MLX inference servers (chat + image tag gen)
+#
+# Configuration: ~/.config/mlx.conf (created on first install).
+# Run "mlx help" or "mlx <command> --help" for usage.
+
+emulate -LR zsh
+setopt err_return pipe_fail
+
+# Resolve our own absolute script path at top-level. Inside functions zsh's
+# default function_argzero makes $0 the function name, so capturing here is
+# the only way to hand the real path to subprocesses (e.g. the router exec'ing
+# us back to swap chat models).
+MLX_SCRIPT_PATH="${0:A}"
+
+# ============================================================================
+# Config file (sourced first; values here override built-in defaults but env
+# vars and command flags still win)
+# ============================================================================
+MLX_CONFIG_FILE="${MLX_CONFIG_FILE:-${HOME}/.config/mlx.conf}"
+if [[ -f "${MLX_CONFIG_FILE}" ]]; then
+    source "${MLX_CONFIG_FILE}"
+fi
+
+# ============================================================================
+# Defaults
+# ============================================================================
+: "${MLX_VENV:=${HOME}/venvs/mlx}"
+: "${MLX_LAUNCHER:=${HOME}/scripts/mlx-server-launch.py}"
+: "${MODELS_ROOT:=${HOME}/mlx-models}"
+: "${MLX_LOG_DIR:=${HOME}/.logs/mlx}"
+: "${MLX_HOST:=127.0.0.1}"
+: "${ALLOWED_ORIGINS:=}"
+
+# Cache/memory controls applied per-server by the launcher shim. Empty = off.
+# Defaults are conservative auto-protection: cap allocator pool, periodically
+# clear it, log mem snapshots. Override per-server in mlx.conf.
+: "${CHAT_CACHE_LIMIT_BYTES:=2147483648}"             # 2 GB pool cap
+: "${CHAT_MEMORY_LIMIT_BYTES:=}"                       # empty = no hard cap
+: "${CHAT_CACHE_CLEAR_INTERVAL_SEC:=60}"
+: "${CHAT_CACHE_CLEAR_THRESHOLD_BYTES:=1073741824}"   # 1 GB
+: "${CHAT_MEMORY_LOG_INTERVAL_SEC:=300}"               # 5 min snapshots
+: "${TAGS_CACHE_LIMIT_BYTES:=1073741824}"           # 1 GB pool cap
+: "${TAGS_MEMORY_LIMIT_BYTES:=}"
+: "${TAGS_CACHE_CLEAR_INTERVAL_SEC:=60}"
+: "${TAGS_CACHE_CLEAR_THRESHOLD_BYTES:=536870912}"  # 512 MB
+: "${TAGS_MEMORY_LOG_INTERVAL_SEC:=300}"
+
+# Active-memory watchdog: execv-restart when active MLX memory grows past
+# (model-loaded baseline + KV_HEADROOM_BYTES). The launcher captures the
+# baseline automatically at the end of the grace period — you only set the
+# cache headroom you'll tolerate above the model. Defends against unbounded
+# prompt-cache growth (mlx_lm bug). Empty = disabled.
+: "${CHAT_KV_HEADROOM_BYTES:=8000000000}"                   # 8 GB above model weights
+: "${CHAT_ACTIVE_MEMORY_CHECK_INTERVAL_SEC:=30}"
+: "${CHAT_ACTIVE_MEMORY_GRACE_SEC:=90}"                     # exempt first 90s; baseline captured at end
+: "${TAGS_KV_HEADROOM_BYTES:=4000000000}"                   # 4 GB above model weights
+: "${TAGS_ACTIVE_MEMORY_CHECK_INTERVAL_SEC:=60}"
+: "${TAGS_ACTIVE_MEMORY_GRACE_SEC:=90}"
+
+# Router: optional in-front proxy that fronts the chat backend (swap-on-demand
+# by `model` field) plus the tags and embed backends (static passthrough).
+# Aggregates /v1/models across all three so clients see the full catalog.
+# Disabled by default; turn on with `mlx router start`.
+: "${ROUTER_NAME:=router}"
+: "${ROUTER_HOST:=127.0.0.1}"
+: "${ROUTER_PORT:=8080}"             # mlx_lm.server's default port
+: "${ROUTER_EXTRA_PORTS:=}"          # additional ports to bind, comma-separated
+: "${ROUTER_SCRIPT:=${HOME}/scripts/mlx-router.py}"
+: "${ROUTER_SWITCH_TIMEOUT:=90}"
+: "${ROUTER_LOG_LEVEL:=INFO}"
+: "${ROUTER_STATICS:=}"              # name=url[|upstream], comma-separated. Auto-derived if empty.
+: "${ROUTER_TAGS_ALIAS:=}"           # alias for the tags backend; defaults to basename(TAGS_MODEL)
+: "${ROUTER_EMBED_ALIAS:=embed}"     # alias for the embed backend
+: "${ROUTER_TTS_ALIAS:=}"            # alias for the tts backend; defaults to basename(TTS_MODEL)
+
+# Chat server
+# Profiles: pick a chat model+draft pair by name. The active selection is
+# resolved in resolve_chat_profile() below: command flag --chat-model wins
+# over CHAT_PROFILE env var wins over CHAT_PROFILE_DEFAULT (config) wins
+# over the literal CHAT_MODEL fallback. Edit CHAT_*_PROFILES in your
+# ~/.config/mlx.conf to register new models.
+typeset -gA CHAT_MODEL_PROFILES CHAT_DRAFT_PROFILES
+[[ ${#CHAT_MODEL_PROFILES} -eq 0 ]] && CHAT_MODEL_PROFILES=(
+    [anubis]="${MODELS_ROOT}/anubis"
+)
+[[ ${#CHAT_DRAFT_PROFILES} -eq 0 ]] && CHAT_DRAFT_PROFILES=(
+    [anubis]="${MODELS_ROOT}/anubis-draft"
+)
+: "${CHAT_PROFILE_DEFAULT:=anubis}"
+: "${CHAT_PROFILE:=}"          # explicit profile override (env var or --chat-model)
+
+: "${CHAT_ENGINE:=lm}"        # lm = mlx_lm.server (text), vlm = mlx_vlm.server (multimodal)
+: "${CHAT_MODEL:=${MODELS_ROOT}/anubis}"
+: "${CHAT_PORT:=1234}"
+: "${CHAT_DRAFT_MODEL:=${CHAT_DRAFT:-${MODELS_ROOT}/anubis-draft}}"
+: "${CHAT_NUM_DRAFT_TOKENS:=5}"
+: "${CHAT_PROMPT_CACHE_SIZE:=32}"
+: "${CHAT_PROMPT_CACHE_BYTES:=25000000000}"
+: "${CHAT_ADAPTER_PATH:=}"
+: "${CHAT_LOG_LEVEL:=}"
+: "${CHAT_CHAT_TEMPLATE:=}"
+: "${CHAT_USE_DEFAULT_CHAT_TEMPLATE:=0}"
+: "${CHAT_CHAT_TEMPLATE_ARGS:=}"
+: "${CHAT_TRUST_REMOTE_CODE:=0}"
+: "${CHAT_DEFAULT_TEMP:=}"
+: "${CHAT_DEFAULT_TOP_P:=}"
+: "${CHAT_DEFAULT_TOP_K:=}"
+: "${CHAT_DEFAULT_MIN_P:=}"
+: "${CHAT_DEFAULT_MAX_TOKENS:=}"
+: "${CHAT_PREFILL_STEP_SIZE:=}"
+: "${CHAT_DECODE_CONCURRENCY:=}"
+: "${CHAT_PROMPT_CONCURRENCY:=}"
+
+# Embed server
+: "${EMBED_MODEL:=mlx-community/nomicai-modernbert-embed-base-8bit}"
+: "${EMBED_PORT:=1236}"
+: "${EMBED_SCRIPT:=${HOME}/scripts/mlx-embed-server.py}"
+
+# TTS server (mlx_audio.server). Multi-model server; preloaded with TTS_MODEL
+# plus any comma-separated paths in TTS_EXTRA_MODELS. All listed models stay
+# resident so clients can switch by setting `model` in /v1/audio/speech.
+: "${TTS_MODEL:=${MODELS_ROOT}/omnivoice}"
+: "${TTS_EXTRA_MODELS:=}"
+: "${TTS_PORT:=1237}"
+: "${TTS_BIN:=${MLX_VENV}/bin/mlx_audio.server}"
+
+# Kokoro server. Separate mlx_audio.server instance pinned to the
+# kokoro-fastapi default port (8880), so clients that hardcode that port
+# (Open WebUI TTS, etc.) find Kokoro without extra config. Shares the same
+# binary as the TTS server; runs as its own process with its own pidfile.
+: "${KOKORO_MODEL:=${MODELS_ROOT}/kokoro}"
+: "${KOKORO_PORT:=8880}"
+: "${KOKORO_BIN:=${MLX_VENV}/bin/mlx_audio.server}"
+
+# Tag-gen server
+: "${TAGS_ENGINE:=vlm}"     # qwen-tags is multimodal; needs mlx_vlm.server
+: "${TAGS_MODEL:=${MODELS_ROOT}/qwen-tags}"
+: "${TAGS_PORT:=1235}"
+: "${TAGS_DRAFT_MODEL:=}"
+: "${TAGS_NUM_DRAFT_TOKENS:=}"
+: "${TAGS_PROMPT_CACHE_SIZE:=16}"
+: "${TAGS_PROMPT_CACHE_BYTES:=5000000000}"
+: "${TAGS_ADAPTER_PATH:=}"
+: "${TAGS_LOG_LEVEL:=}"
+: "${TAGS_CHAT_TEMPLATE:=}"
+: "${TAGS_USE_DEFAULT_CHAT_TEMPLATE:=0}"
+: "${TAGS_CHAT_TEMPLATE_ARGS:=}"
+: "${TAGS_TRUST_REMOTE_CODE:=0}"
+: "${TAGS_DEFAULT_TEMP:=}"
+: "${TAGS_DEFAULT_TOP_P:=}"
+: "${TAGS_DEFAULT_TOP_K:=}"
+: "${TAGS_DEFAULT_MIN_P:=}"
+: "${TAGS_DEFAULT_MAX_TOKENS:=}"
+: "${TAGS_PREFILL_STEP_SIZE:=}"
+: "${TAGS_DECODE_CONCURRENCY:=}"
+: "${TAGS_PROMPT_CONCURRENCY:=}"
+
+HOST="${MLX_HOST}"
+LOG_DIR="${MLX_LOG_DIR}"
+MLX_PY="${MLX_VENV}/bin/python"
+MLX_LM_BIN="${MLX_VENV}/bin/mlx_lm.server"
+MLX_VLM_BIN="${MLX_VENV}/bin/mlx_vlm.server"
+MLX_BIN="${MLX_LM_BIN}"  # legacy alias for help/error messages
+mkdir -p "${LOG_DIR}"
+
+CHAT_NAME="chat"
+TAGS_NAME="qwen-tags"
+EMBED_NAME="embed"
+TTS_NAME="tts"
+KOKORO_NAME="kokoro"
+
+# Per-server flag tables (mlx_lm.server).
+# Optional value flags: only passed if the var is non-empty.
+typeset -ga OPTIONAL_FLAGS=(
+    "DRAFT_MODEL=--draft-model"
+    "NUM_DRAFT_TOKENS=--num-draft-tokens"
+    "PROMPT_CACHE_SIZE=--prompt-cache-size"
+    "PROMPT_CACHE_BYTES=--prompt-cache-bytes"
+    "ADAPTER_PATH=--adapter-path"
+    "LOG_LEVEL=--log-level"
+    "CHAT_TEMPLATE=--chat-template"
+    "CHAT_TEMPLATE_ARGS=--chat-template-args"
+    "DEFAULT_TEMP=--temp"
+    "DEFAULT_TOP_P=--top-p"
+    "DEFAULT_TOP_K=--top-k"
+    "DEFAULT_MIN_P=--min-p"
+    "DEFAULT_MAX_TOKENS=--max-tokens"
+    "PREFILL_STEP_SIZE=--prefill-step-size"
+    "DECODE_CONCURRENCY=--decode-concurrency"
+    "PROMPT_CONCURRENCY=--prompt-concurrency"
+)
+# Boolean flags: passed (no value) if =1.
+typeset -ga BOOL_FLAGS=(
+    "TRUST_REMOTE_CODE=--trust-remote-code"
+    "USE_DEFAULT_CHAT_TEMPLATE=--use-default-chat-template"
+)
+
+# mlx_vlm.server has a different (smaller) flag surface. No spec-dec, no
+# prompt-cache size/bytes, no log level, no chat template overrides, no
+# sampling defaults, no allowed-origins. KV cache is quantized via
+# --kv-bits / --max-kv-size instead. Per-request sampling/template args
+# come through chat_template_kwargs in the OpenAI-compatible body.
+typeset -ga VLM_OPTIONAL_FLAGS=(
+    "ADAPTER_PATH=--adapter-path"
+    "PREFILL_STEP_SIZE=--prefill-step-size"
+    "KV_BITS=--kv-bits"
+    "KV_QUANT_SCHEME=--kv-quant-scheme"
+    "KV_GROUP_SIZE=--kv-group-size"
+    "MAX_KV_SIZE=--max-kv-size"
+    "QUANTIZED_KV_START=--quantized-kv-start"
+)
+typeset -ga VLM_BOOL_FLAGS=(
+    "TRUST_REMOTE_CODE=--trust-remote-code"
+    "RELOAD=--reload"
+)
+
+# ============================================================================
+# Help
+# ============================================================================
+show_root_help() {
+    cat <<EOF
+mlx — manage local MLX inference servers
+
+USAGE
+    mlx <command> [flags]
+
+LIFECYCLE COMMANDS
+    start       Start chat, tags, embed, tts, and kokoro servers
+    stop        Stop running servers (chat, tags, embed, tts, kokoro, or all)
+    restart     Stop, then start (use --chat-model NAME to swap profiles)
+    status      Show running servers, PIDs, and registered chat profiles
+
+DIAGNOSTICS
+    monitor     Poll per-server RSS over time (catch cache growth)
+    tail        Follow a server's log (chat, tags, embed, tts, kokoro)
+    config      Print resolved configuration (incl. registered profiles)
+
+DIRECT INFERENCE  (one-shot prompts to a running server)
+    chat        Send a prompt to the chat server (port ${CHAT_PORT}); streams to stdout
+    tags        Send a prompt to the tags server (port ${TAGS_PORT}); streams to stdout
+    tag         Send an image to the tags server and get positive + negative tags
+
+PROXY
+    router      OpenAI-compatible proxy fronting chat (swap-on-demand) plus
+                static tags/embed/tts backends. See "mlx router help".
+
+OTHER
+    help        Help for any command (start, stop, restart, status, monitor,
+                tail, config, chat, tags, tag, embed, tts, kokoro, router)
+
+FLAGS
+    -h, --help  Show this help
+
+Run "mlx <command> --help" for command-specific help.
+
+CHAT MODEL PROFILES
+    Multiple chat models can be registered as profiles in mlx.conf.
+    Switch with: mlx restart chat --chat-model NAME
+    See registered profiles with: mlx config
+
+    Each profile can carry three things in mlx.conf:
+      CHAT_MODEL_PROFILES[name]    model path (required)
+      CHAT_DRAFT_PROFILES[name]    spec-dec draft path ("" disables)
+      CHAT_ENGINE_PROFILES[name]   "lm" (text, default) or "vlm" (multimodal)
+    Set engine = vlm for image-capable models (Llama-4 Scout, etc.) so the
+    chat server boots mlx_vlm.server and accepts image_url content blocks.
+
+CONFIGURATION
+    Edit ~/.config/mlx.conf to change models, ports, cache sizes,
+    spec-dec settings, profile registry, per-profile engine, etc.
+    Run "mlx config" to see resolved values.
+
+    Override precedence (highest wins): command flags > env vars > config
+    file > built-in defaults.
+
+    Override the config file path with MLX_CONFIG_FILE env var.
+EOF
+}
+
+show_start_help() {
+    cat <<EOF
+Start the MLX servers (chat + tags + embed + tts + kokoro).
+
+All servers launch as background processes via nohup. PIDs are tracked at
+\${MLX_LOG_DIR:-~/.logs/mlx}/*.pid; logs land alongside as *.log.
+
+USAGE
+    mlx start [flags]
+
+FLAGS
+        --no-chat               Skip starting the chat server
+        --no-tags               Skip starting the tags server
+        --no-embed              Skip starting the embed server
+        --no-tts                Skip starting the tts server
+        --no-kokoro             Skip starting the kokoro server
+        --chat-port PORT        Override chat port (default: ${CHAT_PORT})
+        --tags-port PORT        Override tags port (default: ${TAGS_PORT})
+        --embed-port PORT       Override embed port (default: ${EMBED_PORT})
+        --tts-port PORT         Override tts port (default: ${TTS_PORT})
+        --kokoro-port PORT      Override kokoro port (default: ${KOKORO_PORT})
+        --draft-tokens N        Override speculative draft tokens (default: ${CHAT_NUM_DRAFT_TOKENS})
+        --chat-model NAME       Pick a chat model profile (default: ${CHAT_PROFILE_DEFAULT}).
+                                Run "mlx config" to list registered profiles.
+    -h, --help                  Show this help
+EOF
+}
+
+show_stop_help() {
+    cat <<EOF
+Stop running MLX servers.
+
+USAGE
+    mlx stop [server]
+
+ARGUMENTS
+    server      One of: chat, tags, embed, tts, kokoro, all (default: all)
+                Aliases: speech/audio -> tts
+
+FLAGS
+    -h, --help  Show this help
+EOF
+}
+
+show_restart_help() {
+    cat <<EOF
+Restart MLX servers (stop, then start).
+
+USAGE
+    mlx restart [server]
+
+ARGUMENTS
+    server      One of: chat, tags, embed, tts, kokoro, all (default: all)
+                Aliases: speech/audio -> tts
+
+FLAGS
+        --chat-model NAME   Pick a chat model profile when starting back up.
+    -h, --help              Show this help
+EOF
+}
+
+show_status_help() {
+    cat <<EOF
+Show systemd-style status for each server: state, PID, memory (RSS), CPU
+time, uptime, and a tail of the log.
+
+USAGE
+    mlx status [flags]
+
+FLAGS
+    -q, --quiet              Suppress output. Exit 0 if all running, 1 otherwise.
+                             Useful in scripts: \`mlx status -q && echo up\`.
+    -s, --short              One line per server: state, port, memory.
+                             Skips the log tail and profile listing.
+    -n, --no-log             Skip the log tail.
+    -l N, --log-lines N      Show last N log lines per server (default: 5).
+    -h, --help               Show this help
+EOF
+}
+
+show_monitor_help() {
+    cat <<EOF
+Poll resident memory (RSS) for each running server. Useful for spotting
+cache growth: RSS that climbs steadily during steady-state load is the signal.
+On unified-memory Macs, RSS covers weights, MLX's Metal allocator cache,
+prompt cache, and per-request KV.
+
+USAGE
+    mlx monitor [flags]
+
+FLAGS
+    -i, --interval SECS     Polling interval (default: 5)
+    -n, --count N           Stop after N samples (default: run forever)
+        --csv               Emit CSV (header on first sample) for logging
+    -h, --help              Show this help
+
+EXAMPLES
+    mlx monitor                       # live table, Ctrl-C to stop
+    mlx monitor -i 10                 # slower poll
+    mlx monitor --csv > rss.log       # log to file across a session
+EOF
+}
+
+show_tail_help() {
+    cat <<EOF
+Follow a server's log in real time (Ctrl-C to stop).
+
+USAGE
+    mlx tail <server>
+
+ARGUMENTS
+    server      One of: chat, tags, embed, tts, kokoro
+
+FLAGS
+    -h, --help  Show this help
+EOF
+}
+
+show_config_help() {
+    cat <<EOF
+Print resolved configuration (paths, ports, draft model, registered chat
+profiles, all per-server flags).
+
+USAGE
+    mlx config
+
+FLAGS
+    -h, --help  Show this help
+EOF
+}
+
+show_chat_help() {
+    cat <<EOF
+Send a one-shot prompt to the running chat server (port ${CHAT_PORT}) and
+stream the reply to stdout. Uses whichever chat model is currently loaded
+(reads --model from the live process).
+
+USAGE
+    mlx chat <prompt...>
+    mlx chat @<file>
+
+EXAMPLES
+    mlx chat what is the capital of france
+    mlx chat "write a haiku about rain"
+    mlx chat @prompt.md
+    mlx chat @~/notes/query.md
+
+FLAGS
+    -h, --help  Show this help
+EOF
+}
+
+show_tags_help() {
+    cat <<EOF
+Send a one-shot prompt to the running tags server (port ${TAGS_PORT}) and
+stream the reply to stdout. The tags server is multimodal (mlx_vlm.server)
+but this command sends text-only. For image input use "mlx tag <image>".
+
+USAGE
+    mlx tags <prompt...>
+
+EXAMPLES
+    mlx tags describe a sunset
+    mlx tags "list booru tags for: red hair, green eyes"
+
+FLAGS
+    -h, --help  Show this help
+EOF
+}
+
+show_tag_help() {
+    cat <<EOF
+Send an image on disk to the tags server (port ${TAGS_PORT}) and stream
+booru-style positive + negative tags for use as Stable Diffusion
+conditioning. The image is base64-encoded and sent as a data URL inside
+an OpenAI-style multimodal content array.
+
+USAGE
+    mlx tag <image_path>
+
+EXAMPLES
+    mlx tag avatar.png
+    mlx tag ~/Pictures/scene.jpg
+    mlx tag /tmp/screenshot.png
+
+OUTPUT
+    Positive: <tags describing the image>
+    Negative: <tags to avoid in a regeneration>
+
+FLAGS
+    -h, --help  Show this help
+EOF
+}
+
+# ============================================================================
+# Internals
+# ============================================================================
+verify_path() {
+    local label="$1" path="$2"
+    if [[ ! -d "${path}" ]]; then
+        print -u2 "ERROR: ${label} not found at: ${path}"
+        return 1
+    fi
+    if [[ ! -f "${path}/config.json" ]]; then
+        print -u2 "ERROR: ${label} at ${path} is missing config.json"
+        return 1
+    fi
+}
+
+verify_mlx_bin() {
+    if [[ ! -x "${MLX_PY}" ]]; then
+        print -u2 "ERROR: venv python not found at ${MLX_PY}"
+        print -u2 "       Set MLX_VENV (currently: ${MLX_VENV}) or install mlx-lm:"
+        print -u2 "         python3 -m venv ${MLX_VENV} && ${MLX_VENV}/bin/pip install mlx-lm mlx-vlm"
+        return 1
+    fi
+    if [[ ! -f "${MLX_LAUNCHER}" ]]; then
+        print -u2 "ERROR: launcher shim not found at ${MLX_LAUNCHER}"
+        print -u2 "       Set MLX_LAUNCHER or restore the file."
+        return 1
+    fi
+}
+
+# Verify the server module for one engine is importable. lm and vlm have
+# separate pip packages; only fail if the engine the user actually configured
+# is missing.
+verify_engine() {
+    local engine="$1"
+    case "${engine}" in
+        lm)
+            if [[ ! -x "${MLX_LM_BIN}" ]]; then
+                print -u2 "ERROR: mlx_lm.server not found at ${MLX_LM_BIN}"
+                print -u2 "       Install with: ${MLX_VENV}/bin/pip install mlx-lm"
+                return 1
+            fi
+            ;;
+        vlm)
+            if [[ ! -x "${MLX_VLM_BIN}" ]]; then
+                print -u2 "ERROR: mlx_vlm.server not found at ${MLX_VLM_BIN}"
+                print -u2 "       Install with: ${MLX_VENV}/bin/pip install mlx-vlm"
+                return 1
+            fi
+            ;;
+        *)
+            print -u2 "ERROR: unknown engine '${engine}' (expected 'lm' or 'vlm')"
+            return 1
+            ;;
+    esac
+}
+
+resolve_server() {
+    case "$1" in
+        chat|anubis|anubis-chat|"${CHAT_NAME}") print -- "${CHAT_NAME}" ;;
+        tags|qwen|qwen-tags|"${TAGS_NAME}") print -- "${TAGS_NAME}" ;;
+        embed|embeddings|"${EMBED_NAME}") print -- "${EMBED_NAME}" ;;
+        tts|speech|audio|"${TTS_NAME}") print -- "${TTS_NAME}" ;;
+        kokoro|"${KOKORO_NAME}") print -- "${KOKORO_NAME}" ;;
+        all) print -- "all" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Build server args for a server, picking the right flag set per engine.
+# Result lands in global BUILT_ARGS.
+# (zsh on this machine lacks namerefs, so we use a global instead.)
+# Usage: build_server_args CHAT; <use BUILT_ARGS>
+typeset -ga BUILT_ARGS=()
+build_server_args() {
+    local prefix="$1"
+    BUILT_ARGS=()
+
+    local model_var="${prefix}_MODEL"
+    local port_var="${prefix}_PORT"
+    local engine_var="${prefix}_ENGINE"
+    local engine="${(P)engine_var:-lm}"
+
+    BUILT_ARGS=(
+        --model "${(P)model_var}"
+        --host "${HOST}"
+        --port "${(P)port_var}"
+    )
+
+    # Pick the flag tables for this engine.
+    local -a opt_flags bool_flags
+    case "${engine}" in
+        vlm)
+            opt_flags=("${VLM_OPTIONAL_FLAGS[@]}")
+            bool_flags=("${VLM_BOOL_FLAGS[@]}")
+            ;;
+        *)
+            opt_flags=("${OPTIONAL_FLAGS[@]}")
+            bool_flags=("${BOOL_FLAGS[@]}")
+            ;;
+    esac
+
+    local pair suffix flag var_name val
+    for pair in "${opt_flags[@]}"; do
+        suffix="${pair%%=*}"
+        flag="${pair##*=}"
+        var_name="${prefix}_${suffix}"
+        val="${(P)var_name}"
+        if [[ -n "${val}" ]]; then
+            BUILT_ARGS+=("${flag}" "${val}")
+        fi
+    done
+
+    for pair in "${bool_flags[@]}"; do
+        suffix="${pair%%=*}"
+        flag="${pair##*=}"
+        var_name="${prefix}_${suffix}"
+        if [[ "${(P)var_name}" == "1" ]]; then
+            BUILT_ARGS+=("${flag}")
+        fi
+    done
+
+    # mlx_vlm.server has no --allowed-origins; only mlx_lm.server takes it.
+    if [[ "${engine}" != "vlm" ]] && [[ -n "${ALLOWED_ORIGINS}" ]]; then
+        BUILT_ARGS+=(--allowed-origins "${ALLOWED_ORIGINS}")
+    fi
+}
+
+# Build env-var pairs (NAME=VAL) for the launcher shim, scoped to one server.
+# Result lands in global LAUNCH_ENV.
+typeset -ga LAUNCH_ENV=()
+typeset -ga LAUNCH_ENV_KEYS=(
+    "CACHE_LIMIT_BYTES=MLX_CACHE_LIMIT_BYTES"
+    "MEMORY_LIMIT_BYTES=MLX_MEMORY_LIMIT_BYTES"
+    "CACHE_CLEAR_INTERVAL_SEC=MLX_CACHE_CLEAR_INTERVAL_SEC"
+    "CACHE_CLEAR_THRESHOLD_BYTES=MLX_CACHE_CLEAR_THRESHOLD_BYTES"
+    "MEMORY_LOG_INTERVAL_SEC=MLX_MEMORY_LOG_INTERVAL_SEC"
+    "KV_HEADROOM_BYTES=MLX_KV_HEADROOM_BYTES"
+    "ACTIVE_MEMORY_CHECK_INTERVAL_SEC=MLX_ACTIVE_MEMORY_CHECK_INTERVAL_SEC"
+    "ACTIVE_MEMORY_GRACE_SEC=MLX_ACTIVE_MEMORY_GRACE_SEC"
+)
+build_launch_env() {
+    local prefix="$1"
+    LAUNCH_ENV=()
+
+    # Engine selector for the launcher shim (selects mlx_lm vs mlx_vlm).
+    local engine_var="${prefix}_ENGINE"
+    local engine="${(P)engine_var:-lm}"
+    LAUNCH_ENV+=("MLX_ENGINE=${engine}")
+
+    local pair suffix envname var_name val
+    for pair in "${LAUNCH_ENV_KEYS[@]}"; do
+        suffix="${pair%%=*}"
+        envname="${pair##*=}"
+        var_name="${prefix}_${suffix}"
+        val="${(P)var_name}"
+        if [[ -n "${val}" ]]; then
+            LAUNCH_ENV+=("${envname}=${val}")
+        fi
+    done
+}
+
+launch() {
+    local name="$1"; shift
+    local pidfile="${LOG_DIR}/${name}.pid"
+    local log="${LOG_DIR}/${name}.log"
+
+    if [[ -f "${pidfile}" ]] && kill -0 "$(<"${pidfile}")" 2>/dev/null; then
+        print ">>> ${name} already running (pid $(<"${pidfile}"))"
+        return 0
+    fi
+
+    print ">>> Starting ${name}"
+    nohup env "${LAUNCH_ENV[@]}" "${MLX_PY}" "${MLX_LAUNCHER}" "$@" >"${log}" 2>&1 &!
+    print "$!" >"${pidfile}"
+    print "    pid: $(<"${pidfile}")"
+    print "    log: ${log}"
+}
+
+stop_one() {
+    local name="$1"
+    local pidfile="${LOG_DIR}/${name}.pid"
+    if [[ ! -f "${pidfile}" ]]; then
+        print "<<< ${name} not running"
+        return 0
+    fi
+    local pid
+    pid="$(<"${pidfile}")"
+    if kill -0 "${pid}" 2>/dev/null; then
+        print "<<< Stopping ${name} (pid ${pid})"
+        kill "${pid}"
+        sleep 1
+        if kill -0 "${pid}" 2>/dev/null; then
+            print "    still alive, sending SIGKILL"
+            kill -9 "${pid}" 2>/dev/null || true
+        fi
+    else
+        print "<<< ${name} not running (stale pid ${pid})"
+    fi
+    rm -f "${pidfile}"
+}
+
+# ============================================================================
+# Commands
+# ============================================================================
+
+# Resolve the chat model + draft + engine from profile name, with this
+# precedence:
+#   1. CHAT_PROFILE (set by --chat-model flag or env var)
+#   2. CHAT_PROFILE_DEFAULT (config file)
+#   3. existing CHAT_MODEL value (legacy escape hatch; no profile lookup)
+# Sets CHAT_MODEL, CHAT_DRAFT_MODEL, and CHAT_ENGINE when a profile is
+# selected. Empty draft entry disables spec-dec. Missing engine entry falls
+# back to the global CHAT_ENGINE (default 'lm').
+resolve_chat_profile() {
+    local profile="${CHAT_PROFILE:-${CHAT_PROFILE_DEFAULT}}"
+    [[ -z "${profile}" ]] && return 0
+    if [[ -z "${CHAT_MODEL_PROFILES[$profile]+x}" ]]; then
+        print -u2 "ERROR: unknown chat profile '${profile}'. Known profiles:"
+        local k
+        for k in "${(@k)CHAT_MODEL_PROFILES}"; do
+            print -u2 "  ${k}  ->  ${CHAT_MODEL_PROFILES[$k]}"
+        done
+        return 1
+    fi
+    CHAT_MODEL="${CHAT_MODEL_PROFILES[$profile]}"
+    CHAT_DRAFT_MODEL="${CHAT_DRAFT_PROFILES[$profile]:-}"
+    local engine_override="${CHAT_ENGINE_PROFILES[$profile]:-}"
+    [[ -n "${engine_override}" ]] && CHAT_ENGINE="${engine_override}"
+    CHAT_PROFILE="${profile}"
+}
+
+launch_embed() {
+    local pidfile="${LOG_DIR}/${EMBED_NAME}.pid"
+    local log="${LOG_DIR}/${EMBED_NAME}.log"
+
+    if [[ -f "${pidfile}" ]] && kill -0 "$(<"${pidfile}")" 2>/dev/null; then
+        print ">>> ${EMBED_NAME} already running (pid $(<"${pidfile}"))"
+        return 0
+    fi
+    if [[ ! -f "${EMBED_SCRIPT}" ]]; then
+        print -u2 "ERROR: embed server script not found at ${EMBED_SCRIPT}"
+        return 1
+    fi
+
+    print ">>> Starting ${EMBED_NAME}"
+    print "    model: ${EMBED_MODEL}"
+    print "    port:  ${EMBED_PORT}"
+    nohup "${MLX_PY}" "${EMBED_SCRIPT}" \
+        --model "${EMBED_MODEL}" \
+        --host "${HOST}" \
+        --port "${EMBED_PORT}" \
+        >"${log}" 2>&1 &!
+    print "$!" >"${pidfile}"
+    print "    pid:   $(<"${pidfile}")"
+    print "    log:   ${log}"
+}
+
+# Generic mlx_audio.server launcher used by both TTS and Kokoro.
+# Args: name port bin primary_model extra_models_csv
+launch_audio() {
+    local name="$1" port="$2" bin="$3" primary="$4" extras_csv="$5"
+    local pidfile="${LOG_DIR}/${name}.pid"
+    local log="${LOG_DIR}/${name}.log"
+
+    if [[ -f "${pidfile}" ]] && kill -0 "$(<"${pidfile}")" 2>/dev/null; then
+        print ">>> ${name} already running (pid $(<"${pidfile}"))"
+        return 0
+    fi
+    if [[ ! -x "${bin}" ]]; then
+        print -u2 "ERROR: audio binary not found or not executable: ${bin}"
+        print -u2 "       install with: ${MLX_VENV}/bin/pip install mlx-audio webrtcvad python-multipart"
+        return 1
+    fi
+    verify_path "${name} model" "${primary}" || return 1
+
+    print ">>> Starting ${name}"
+    print "    model: ${primary}"
+    print "    port:  ${port}"
+    nohup "${bin}" \
+        --host "${HOST}" \
+        --port "${port}" \
+        >"${log}" 2>&1 &!
+    print "$!" >"${pidfile}"
+    print "    pid:   $(<"${pidfile}")"
+    print "    log:   ${log}"
+
+    # Preload primary model plus any extras so the first request doesn't pay
+    # the load tax. mlx_audio.server takes the model via query param on
+    # POST /v1/models. Each model is sent as its own POST; all stay resident.
+    if command -v curl >/dev/null 2>&1; then
+        local tries=0
+        while (( tries < 30 )); do
+            if curl -s --max-time 1 -o /dev/null \
+                "http://${HOST}:${port}/v1/models"; then
+                local -a preload_models=("${primary}")
+                if [[ -n "${extras_csv}" ]]; then
+                    local m
+                    for m in ${(s:,:)extras_csv}; do
+                        m="${m## }"; m="${m%% }"
+                        [[ -n "${m}" ]] && preload_models+=("${m}")
+                    done
+                fi
+                local model url
+                for model in "${preload_models[@]}"; do
+                    url=$(/usr/bin/python3 -c \
+                        "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" \
+                        "${model}")
+                    curl -s --max-time 5 -X POST \
+                        "http://${HOST}:${port}/v1/models?model_name=${url}" \
+                        >/dev/null 2>&1 &!
+                done
+                print "    preload submitted (background): ${#preload_models[@]} model(s)"
+                break
+            fi
+            sleep 0.5
+            (( ++tries ))
+        done
+    fi
+}
+
+launch_tts() {
+    launch_audio "${TTS_NAME}" "${TTS_PORT}" "${TTS_BIN}" \
+        "${TTS_MODEL}" "${TTS_EXTRA_MODELS}"
+}
+
+launch_kokoro() {
+    launch_audio "${KOKORO_NAME}" "${KOKORO_PORT}" "${KOKORO_BIN}" \
+        "${KOKORO_MODEL}" ""
+}
+
+cmd_start() {
+    local skip_chat=0 skip_tags=0 skip_embed=0 skip_tts=0 skip_kokoro=0
+    while (( $# )); do
+        case "$1" in
+            -h|--help) show_start_help; return 0 ;;
+            --no-chat) skip_chat=1; shift ;;
+            --no-tags) skip_tags=1; shift ;;
+            --no-embed) skip_embed=1; shift ;;
+            --no-tts) skip_tts=1; shift ;;
+            --no-kokoro) skip_kokoro=1; shift ;;
+            --chat-port) CHAT_PORT="$2"; shift 2 ;;
+            --chat-port=*) CHAT_PORT="${1#*=}"; shift ;;
+            --tags-port) TAGS_PORT="$2"; shift 2 ;;
+            --tags-port=*) TAGS_PORT="${1#*=}"; shift ;;
+            --embed-port) EMBED_PORT="$2"; shift 2 ;;
+            --embed-port=*) EMBED_PORT="${1#*=}"; shift ;;
+            --tts-port) TTS_PORT="$2"; shift 2 ;;
+            --tts-port=*) TTS_PORT="${1#*=}"; shift ;;
+            --kokoro-port) KOKORO_PORT="$2"; shift 2 ;;
+            --kokoro-port=*) KOKORO_PORT="${1#*=}"; shift ;;
+            --draft-tokens) CHAT_NUM_DRAFT_TOKENS="$2"; shift 2 ;;
+            --draft-tokens=*) CHAT_NUM_DRAFT_TOKENS="${1#*=}"; shift ;;
+            --chat-model) CHAT_PROFILE="$2"; shift 2 ;;
+            --chat-model=*) CHAT_PROFILE="${1#*=}"; shift ;;
+            *) print -u2 "unknown flag: $1"; show_start_help; return 1 ;;
+        esac
+    done
+
+    if (( ! skip_chat )); then
+        resolve_chat_profile || return 1
+        print "chat profile: ${CHAT_PROFILE}  model: ${CHAT_MODEL}  draft: ${CHAT_DRAFT_MODEL:-<none>}"
+    fi
+
+    verify_mlx_bin || return 1
+    if (( ! skip_chat )); then
+        verify_engine "${CHAT_ENGINE}" || return 1
+        verify_path "chat model" "${CHAT_MODEL}" || return 1
+        [[ -n "${CHAT_DRAFT_MODEL}" ]] && [[ "${CHAT_ENGINE}" == "lm" ]] && { verify_path "chat draft model" "${CHAT_DRAFT_MODEL}" || return 1 }
+        [[ -n "${CHAT_ADAPTER_PATH}" ]] && { verify_path "chat adapter" "${CHAT_ADAPTER_PATH}" || return 1 }
+    fi
+    if (( ! skip_tags )); then
+        verify_engine "${TAGS_ENGINE}" || return 1
+        verify_path "tags model" "${TAGS_MODEL}" || return 1
+        [[ -n "${TAGS_DRAFT_MODEL}" ]] && [[ "${TAGS_ENGINE}" == "lm" ]] && { verify_path "tags draft model" "${TAGS_DRAFT_MODEL}" || return 1 }
+        [[ -n "${TAGS_ADAPTER_PATH}" ]] && { verify_path "tags adapter" "${TAGS_ADAPTER_PATH}" || return 1 }
+    fi
+
+    if (( ! skip_chat )); then
+        build_server_args CHAT
+        build_launch_env CHAT
+        launch "${CHAT_NAME}" "${BUILT_ARGS[@]}"
+    fi
+    if (( ! skip_tags )); then
+        build_server_args TAGS
+        build_launch_env TAGS
+        launch "${TAGS_NAME}" "${BUILT_ARGS[@]}"
+    fi
+    if (( ! skip_embed )); then
+        launch_embed
+    fi
+    if (( ! skip_tts )); then
+        launch_tts
+    fi
+    if (( ! skip_kokoro )); then
+        launch_kokoro
+    fi
+
+    print
+    print "Endpoints:"
+    (( ! skip_chat ))   && print "  chat:   http://${HOST}:${CHAT_PORT}/v1   (k=${CHAT_NUM_DRAFT_TOKENS})"
+    (( ! skip_tags ))   && print "  tags:   http://${HOST}:${TAGS_PORT}/v1"
+    (( ! skip_embed ))  && print "  embed:  http://${HOST}:${EMBED_PORT}/v1/embeddings"
+    (( ! skip_tts ))    && print "  tts:    http://${HOST}:${TTS_PORT}/v1/audio/speech"
+    (( ! skip_kokoro )) && print "  kokoro: http://${HOST}:${KOKORO_PORT}/v1/audio/speech"
+}
+
+cmd_stop() {
+    local target="all"
+    while (( $# )); do
+        case "$1" in
+            -h|--help) show_stop_help; return 0 ;;
+            -*) print -u2 "unknown flag: $1"; show_stop_help; return 1 ;;
+            *)
+                target=$(resolve_server "$1") || { print -u2 "unknown server: $1"; show_stop_help; return 1 }
+                shift
+                ;;
+        esac
+    done
+
+    case "${target}" in
+        "${CHAT_NAME}") stop_one "${CHAT_NAME}" ;;
+        "${TAGS_NAME}") stop_one "${TAGS_NAME}" ;;
+        "${EMBED_NAME}") stop_one "${EMBED_NAME}" ;;
+        "${TTS_NAME}") stop_one "${TTS_NAME}" ;;
+        "${KOKORO_NAME}") stop_one "${KOKORO_NAME}" ;;
+        all) stop_one "${CHAT_NAME}"; stop_one "${TAGS_NAME}"; stop_one "${EMBED_NAME}"; stop_one "${TTS_NAME}"; stop_one "${KOKORO_NAME}" ;;
+    esac
+}
+
+cmd_restart() {
+    local target="all"
+    local args=()
+    local start_extra=()
+    while (( $# )); do
+        case "$1" in
+            -h|--help) show_restart_help; return 0 ;;
+            --chat-model) start_extra+=("$1" "$2"); shift 2 ;;
+            --chat-model=*) start_extra+=("$1"); shift ;;
+            --embed-port) EMBED_PORT="$2"; shift 2 ;;
+            --embed-port=*) EMBED_PORT="${1#*=}"; shift ;;
+            -*) print -u2 "unknown flag: $1"; show_restart_help; return 1 ;;
+            *)
+                target=$(resolve_server "$1") || { print -u2 "unknown server: $1"; show_restart_help; return 1 }
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if (( ${#args} > 0 )); then
+        cmd_stop "${args[@]}"
+    else
+        cmd_stop
+    fi
+    sleep 1
+
+    case "${target}" in
+        "${CHAT_NAME}") cmd_start --no-tags --no-embed --no-tts --no-kokoro "${start_extra[@]}" ;;
+        "${TAGS_NAME}") cmd_start --no-chat --no-embed --no-tts --no-kokoro "${start_extra[@]}" ;;
+        "${EMBED_NAME}") cmd_start --no-chat --no-tags --no-tts --no-kokoro "${start_extra[@]}" ;;
+        "${TTS_NAME}") cmd_start --no-chat --no-tags --no-embed --no-kokoro "${start_extra[@]}" ;;
+        "${KOKORO_NAME}") cmd_start --no-chat --no-tags --no-embed --no-tts "${start_extra[@]}" ;;
+        all) cmd_start "${start_extra[@]}" ;;
+    esac
+}
+
+_format_kb() {
+    local kb="${1:-0}"
+    if (( kb >= 1048576 )); then
+        printf "%.2f GB" $(( kb / 1048576.0 ))
+    elif (( kb >= 1024 )); then
+        printf "%.1f MB" $(( kb / 1024.0 ))
+    else
+        printf "%d KB" "${kb}"
+    fi
+}
+
+# Read MLX active memory from the launcher's periodic mem snapshot in the log.
+# RSS chronically undercounts mlx models because weights live in Metal/unified
+# memory pools that don't fault into the process page tables — for VLM models
+# the gap can be 30x. The launcher shim writes lines like:
+#   [mlx-launch] mem: active=17.99 GB cache=0.00 GB peak=19.86 GB
+# This is the truth; we parse and prefer it over RSS when available.
+# Returns: bytes (integer), or empty string if no mem line found.
+_mlx_active_bytes() {
+    setopt local_options no_err_return
+    local log="${1:-}"
+    [[ -z "${log}" ]] || [[ ! -f "${log}" ]] && return 0
+    local line
+    line=$(grep "\[mlx-launch\] mem:" "${log}" 2>/dev/null | tail -1)
+    [[ -z "${line}" ]] && return 0
+    # Parse "active=X.XX GB" -> bytes
+    /usr/bin/python3 -c "
+import re, sys
+m = re.search(r'active=([\d.]+)\s*(GB|MB|KB)', sys.argv[1])
+if not m:
+    sys.exit(0)
+val = float(m.group(1))
+unit = m.group(2)
+mult = {'GB': 1024**3, 'MB': 1024**2, 'KB': 1024}[unit]
+print(int(val * mult))
+" "${line}" 2>/dev/null
+    return 0
+}
+
+# Sum RSS across a process and all its descendants. Kept for fallback when
+# no mlx-launch mem line is available in the log yet (e.g. server just started).
+_rss_tree_kb() {
+    setopt local_options no_err_return
+    local root_pid="${1:-}"
+    if [[ -z "${root_pid}" ]]; then print -- 0; return 0; fi
+    # Walk the process tree using BSD ps. Build a set of all descendant PIDs.
+    local total=0 pid kb
+    local descendants
+    descendants=$(/usr/bin/python3 -c "
+import subprocess, sys
+root = int(sys.argv[1])
+out = subprocess.run(['ps', '-axo', 'pid=,ppid='], capture_output=True, text=True).stdout
+parent = {}
+for line in out.splitlines():
+    parts = line.split()
+    if len(parts) == 2:
+        try:
+            p, pp = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        parent.setdefault(pp, []).append(p)
+all_pids = [root]
+i = 0
+while i < len(all_pids):
+    for child in parent.get(all_pids[i], []):
+        if child not in all_pids:
+            all_pids.append(child)
+    i += 1
+print(' '.join(str(p) for p in all_pids))
+" "${root_pid}" 2>/dev/null)
+    [[ -z "${descendants}" ]] && descendants="${root_pid}"
+    for pid in ${=descendants}; do
+        kb=$(ps -p "${pid}" -o rss= 2>/dev/null | tr -d ' ')
+        if [[ -n "${kb}" ]] && [[ "${kb}" =~ ^[0-9]+$ ]]; then
+            (( total = total + kb ))
+        fi
+    done
+    print -- "${total}"
+    return 0
+}
+
+# ANSI colors. Disabled when stdout isn't a TTY (e.g. piping into less).
+if [[ -t 1 ]]; then
+    _C_GREEN=$'\e[0;32m'
+    _C_RED=$'\e[0;31m'
+    _C_YELLOW=$'\e[0;33m'
+    _C_DIM=$'\e[2m'
+    _C_BOLD=$'\e[1m'
+    _C_RESET=$'\e[0m'
+else
+    _C_GREEN="" _C_RED="" _C_YELLOW="" _C_DIM="" _C_BOLD="" _C_RESET=""
+fi
+
+# Print a systemd-style status block for one server.
+# Args: name port description tail_lines
+_status_one() {
+    local name="$1" port="$2" desc="$3" tail_lines="${4:-0}"
+    local pidfile="${LOG_DIR}/${name}.pid"
+    local log="${LOG_DIR}/${name}.log"
+
+    local pid="" state dot_color
+    if [[ -f "${pidfile}" ]]; then
+        pid="$(<"${pidfile}")"
+        if kill -0 "${pid}" 2>/dev/null; then
+            state="${_C_GREEN}active (running)${_C_RESET}"
+            dot_color="${_C_GREEN}"
+        else
+            state="${_C_RED}dead${_C_RESET} ${_C_DIM}(stale pid ${pid})${_C_RESET}"
+            dot_color="${_C_RED}"
+            pid=""
+            return 1
+        fi
+    else
+        state="${_C_YELLOW}inactive${_C_RESET} ${_C_DIM}(not started)${_C_RESET}"
+        dot_color="${_C_YELLOW}"
+        return 1
+    fi 2>/dev/null
+
+    # Print header even if we returned non-zero above; we want the visible block.
+    print -- "${dot_color}●${_C_RESET} ${_C_BOLD}${name}${_C_RESET} — ${desc}"
+    printf "       %s%-9s%s %s\n" "${_C_DIM}" "Status:" "${_C_RESET}" "${state}"
+    printf "       %s%-9s%s %s\n" "${_C_DIM}" "Port:"   "${_C_RESET}" "${port}"
+    printf "       %s%-9s%s %s\n" "${_C_DIM}" "Log:"    "${_C_RESET}" "${log}"
+
+    if [[ -n "${pid}" ]]; then
+        local rss_kb cpu_time elapsed since rss_human mlx_bytes mem_line
+        rss_kb=$(_rss_tree_kb "${pid}")
+        cpu_time=$(ps -p "${pid}" -o time= 2>/dev/null | tr -d ' ')
+        since=$(ps -p "${pid}" -o lstart= 2>/dev/null | sed 's/  */ /g; s/^ //; s/ *$//')
+        elapsed=$(ps -p "${pid}" -o etime= 2>/dev/null | tr -d ' ')
+        rss_human=$(_format_kb "${rss_kb}")
+
+        # Prefer the launcher's MLX active-memory log when available; that's
+        # the truth for Metal/unified-memory allocations. Fall back to RSS.
+        mlx_bytes=$(_mlx_active_bytes "${log}")
+        if [[ -n "${mlx_bytes}" ]] && (( mlx_bytes > 0 )); then
+            mem_line=$(printf "%.2f GB active (Metal) ${_C_DIM}/ %s resident${_C_RESET}" \
+                $(( mlx_bytes / 1073741824.0 )) "${rss_human}")
+        else
+            mem_line="${rss_human} resident"
+        fi
+
+        printf "       %s%-9s%s %s\n" "${_C_DIM}" "PID:"    "${_C_RESET}" "${pid}"
+        printf "       %s%-9s%s %s\n" "${_C_DIM}" "Memory:" "${_C_RESET}" "${mem_line}"
+        printf "       %s%-9s%s %s\n" "${_C_DIM}" "CPU:"    "${_C_RESET}" "${cpu_time}"
+        printf "       %s%-9s%s %s ${_C_DIM}(%s ago)${_C_RESET}\n" "${_C_DIM}" "Since:" "${_C_RESET}" "${since}" "${elapsed}"
+
+        if (( tail_lines > 0 )) && [[ -f "${log}" ]]; then
+            print -- "       ${_C_DIM}Recent log:${_C_RESET}"
+            tail -n "${tail_lines}" "${log}" 2>/dev/null | sed "s/^/         ${_C_DIM}>${_C_RESET} /"
+        fi
+    fi
+}
+
+_status_short_one() {
+    local name="$1" port="$2"
+    local pidfile="${LOG_DIR}/${name}.pid"
+    local log="${LOG_DIR}/${name}.log"
+    local state_word state_color pid="" mem="-"
+    local rc=0
+
+    if [[ -f "${pidfile}" ]] && kill -0 "$(<"${pidfile}")" 2>/dev/null; then
+        pid="$(<"${pidfile}")"
+        state_word="up"
+        state_color="${_C_GREEN}"
+    else
+        state_word="down"
+        state_color="${_C_RED}"
+        rc=1
+    fi
+
+    if [[ -n "${pid}" ]]; then
+        local rss_kb mlx_bytes
+        rss_kb=$(_rss_tree_kb "${pid}")
+        mlx_bytes=$(_mlx_active_bytes "${log}")
+        if [[ -n "${mlx_bytes}" ]] && (( mlx_bytes > 0 )); then
+            mem=$(printf "%.2f GB active" $(( mlx_bytes / 1073741824.0 )))
+        else
+            mem="$(_format_kb "${rss_kb}") resident"
+        fi
+    fi
+
+    printf "%-9s %s%-4s%s  %-5s %s\n" \
+        "${name}" "${state_color}" "${state_word}" "${_C_RESET}" "${port}" "${mem}"
+    return $rc
+}
+
+cmd_status() {
+    local quiet=0 short=0 tail_lines=5
+    while (( $# )); do
+        case "$1" in
+            -h|--help) show_status_help; return 0 ;;
+            -q|--quiet) quiet=1; shift ;;
+            -s|--short) short=1; shift ;;
+            -n|--no-log) tail_lines=0; shift ;;
+            -l|--log-lines) tail_lines="$2"; shift 2 ;;
+            -l=*|--log-lines=*) tail_lines="${1#*=}"; shift ;;
+            *) print -u2 "unknown flag: $1"; show_status_help; return 1 ;;
+        esac
+    done
+
+    if (( quiet )); then
+        local rc=0 name pidfile
+        for name in "${CHAT_NAME}" "${TAGS_NAME}" "${EMBED_NAME}" "${TTS_NAME}" "${KOKORO_NAME}"; do
+            pidfile="${LOG_DIR}/${name}.pid"
+            if [[ ! -f "${pidfile}" ]] || ! kill -0 "$(<"${pidfile}")" 2>/dev/null; then
+                rc=1
+            fi
+        done
+        return $rc
+    fi
+
+    if (( short )); then
+        local rc=0
+        _status_short_one "${CHAT_NAME}"   "${CHAT_PORT}"   || rc=1
+        _status_short_one "${TAGS_NAME}"   "${TAGS_PORT}"   || rc=1
+        _status_short_one "${EMBED_NAME}"  "${EMBED_PORT}"  || rc=1
+        _status_short_one "${TTS_NAME}"    "${TTS_PORT}"    || rc=1
+        _status_short_one "${KOKORO_NAME}" "${KOKORO_PORT}" || rc=1
+        return $rc
+    fi
+
+    local rc=0
+    _status_one "${CHAT_NAME}" "${CHAT_PORT}" \
+        "$(_describe_server "${CHAT_NAME}" "lm/vlm chat")" \
+        "${tail_lines}" || rc=1
+    _print_chat_profiles
+    print
+    _status_one "${TAGS_NAME}" "${TAGS_PORT}" \
+        "$(_describe_server "${TAGS_NAME}" "image tagging")" \
+        "${tail_lines}" || rc=1
+    print
+    _status_one "${EMBED_NAME}" "${EMBED_PORT}" \
+        "embeddings: ${EMBED_MODEL:t}" \
+        "${tail_lines}" || rc=1
+    print
+    _status_one "${TTS_NAME}" "${TTS_PORT}" \
+        "tts: ${TTS_MODEL:t}" \
+        "${tail_lines}" || rc=1
+    print
+    _status_one "${KOKORO_NAME}" "${KOKORO_PORT}" \
+        "kokoro: ${KOKORO_MODEL:t}" \
+        "${tail_lines}" || rc=1
+    return $rc
+}
+
+# List all registered chat profiles, marking which one is loaded by reading
+# --model from the running chat process. Skipped silently if no profiles
+# are registered (i.e., legacy single-model setup).
+_print_chat_profiles() {
+    (( ${#CHAT_MODEL_PROFILES} == 0 )) && return
+    local pidfile="${LOG_DIR}/${CHAT_NAME}.pid" loaded_path=""
+    if [[ -f "${pidfile}" ]]; then
+        local pid
+        pid="$(<"${pidfile}")"
+        if kill -0 "${pid}" 2>/dev/null; then
+            local cmd
+            cmd="$(ps -p "${pid}" -o command= 2>/dev/null)"
+            loaded_path="${cmd##*--model }"
+            loaded_path="${loaded_path%% *}"
+        fi
+    fi
+    print -- "       ${_C_DIM}Profiles:${_C_RESET}"
+    local k mark
+    for k in "${(@k)CHAT_MODEL_PROFILES}"; do
+        if [[ "${CHAT_MODEL_PROFILES[$k]}" == "${loaded_path}" ]]; then
+            mark="${_C_GREEN}● loaded${_C_RESET}"
+        else
+            mark="${_C_DIM}  available${_C_RESET}"
+        fi
+        printf "         %s %-12s %s\n" "${mark}" "${k}" "${CHAT_MODEL_PROFILES[$k]}"
+    done
+}
+
+# Build a one-line description of the server from its live command line.
+# Reads --model from the running process and emits the symlink alias under
+# MODELS_ROOT (e.g. "anubis", "eva", "qwen-tags"). Falls back to the static
+# label when the process isn't running.
+_describe_server() {
+    local name="$1" fallback="$2"
+    local pidfile="${LOG_DIR}/${name}.pid"
+    [[ -f "${pidfile}" ]] || { print -- "${fallback}"; return; }
+    local pid
+    pid="$(<"${pidfile}")"
+    kill -0 "${pid}" 2>/dev/null || { print -- "${fallback}"; return; }
+    local cmd
+    cmd="$(ps -p "${pid}" -o command= 2>/dev/null)"
+    local model="${cmd##*--model }"
+    model="${model%% *}"
+    [[ -z "${model}" ]] && { print -- "${fallback}"; return; }
+    print -- "model: ${model:t}"
+}
+
+cmd_monitor() {
+    local interval=5 count=0 csv=0
+    while (( $# )); do
+        case "$1" in
+            -h|--help) show_monitor_help; return 0 ;;
+            -i|--interval) interval="$2"; shift 2 ;;
+            -i=*|--interval=*) interval="${1#*=}"; shift ;;
+            -n|--count) count="$2"; shift 2 ;;
+            -n=*|--count=*) count="${1#*=}"; shift ;;
+            --csv) csv=1; shift ;;
+            *) print -u2 "unknown flag: $1"; show_monitor_help; return 1 ;;
+        esac
+    done
+
+    local chat_pid="" tags_pid=""
+    [[ -f "${LOG_DIR}/${CHAT_NAME}.pid" ]] && chat_pid="$(<"${LOG_DIR}/${CHAT_NAME}.pid")"
+    [[ -f "${LOG_DIR}/${TAGS_NAME}.pid" ]] && tags_pid="$(<"${LOG_DIR}/${TAGS_NAME}.pid")"
+    [[ -n "${chat_pid}" ]] && kill -0 "${chat_pid}" 2>/dev/null || chat_pid=""
+    [[ -n "${tags_pid}" ]] && kill -0 "${tags_pid}" 2>/dev/null || tags_pid=""
+
+    if [[ -z "${chat_pid}" && -z "${tags_pid}" ]]; then
+        print -u2 "no servers running. start one with 'mlx start'"
+        return 1
+    fi
+
+    local chat_base_kb=0 tags_base_kb=0
+    [[ -n "${chat_pid}"   ]] && chat_base_kb=$(_rss_tree_kb "${chat_pid}")
+    [[ -n "${tags_pid}" ]] && tags_base_kb=$(_rss_tree_kb "${tags_pid}")
+
+    if (( csv )); then
+        print "timestamp,chat_pid,chat_rss_mb,chat_delta_mb,tags_pid,tags_rss_mb,tags_delta_mb"
+    else
+        printf "%-19s  %-22s  %-22s\n" "time" "chat (RSS / Δ)" "tags (RSS / Δ)"
+        printf "%-19s  %-22s  %-22s\n" "-------------------" "----------------------" "----------------------"
+    fi
+
+    local n=0
+    while :; do
+        local ts chat_kb=0 tags_kb=0 chat_delta_mb=0 tags_delta_mb=0
+        ts=$(date "+%Y-%m-%d %H:%M:%S")
+
+        if [[ -n "${chat_pid}" ]] && kill -0 "${chat_pid}" 2>/dev/null; then
+            chat_kb=$(_rss_tree_kb "${chat_pid}")
+            (( chat_delta_mb = (chat_kb - chat_base_kb) / 1024 ))
+        else
+            chat_pid=""
+        fi
+        if [[ -n "${tags_pid}" ]] && kill -0 "${tags_pid}" 2>/dev/null; then
+            tags_kb=$(_rss_tree_kb "${tags_pid}")
+            (( tags_delta_mb = (tags_kb - tags_base_kb) / 1024 ))
+        else
+            tags_pid=""
+        fi
+
+        if (( csv )); then
+            printf "%s,%s,%.1f,%d,%s,%.1f,%d\n" \
+                "${ts}" \
+                "${chat_pid:-}"   $(( chat_kb   / 1024.0 )) "${chat_delta_mb}" \
+                "${tags_pid:-}" $(( tags_kb / 1024.0 )) "${tags_delta_mb}"
+        else
+            local chat_str tags_str
+            if [[ -n "${chat_pid}" ]]; then
+                chat_str="$(_format_kb "${chat_kb}") / $(_format_signed_mb "${chat_delta_mb}")"
+            else
+                chat_str="${_C_DIM}stopped${_C_RESET}"
+            fi
+            if [[ -n "${tags_pid}" ]]; then
+                tags_str="$(_format_kb "${tags_kb}") / $(_format_signed_mb "${tags_delta_mb}")"
+            else
+                tags_str="${_C_DIM}stopped${_C_RESET}"
+            fi
+            printf "%-19s  %-22s  %-22s\n" "${ts}" "${chat_str}" "${tags_str}"
+        fi
+
+        if [[ -z "${chat_pid}" && -z "${tags_pid}" ]]; then
+            print -u2 "all servers stopped"
+            return 1
+        fi
+
+        (( ++n ))   # pre-increment: returns NEW value (truthy 1+); post-increment
+                    # would return 0 first iter, false under err_return, would abort.
+        if (( count > 0 && n >= count )); then
+            return 0
+        fi
+        sleep "${interval}"
+    done
+}
+
+# Format a signed MB delta (e.g. "+312 MB" / "-48 MB" / "0 MB").
+_format_signed_mb() {
+    local mb="${1:-0}"
+    if (( mb > 0 )); then
+        printf "+%d MB" "${mb}"
+    elif (( mb < 0 )); then
+        printf "%d MB" "${mb}"
+    else
+        print "0 MB"
+    fi
+}
+
+cmd_tail() {
+    local target=""
+    while (( $# )); do
+        case "$1" in
+            -h|--help) show_tail_help; return 0 ;;
+            -*) print -u2 "unknown flag: $1"; show_tail_help; return 1 ;;
+            *)
+                target=$(resolve_server "$1") || { print -u2 "unknown server: $1"; show_tail_help; return 1 }
+                if [[ "${target}" == "all" ]]; then
+                    print -u2 "tail requires a specific server (chat, tags, embed, tts), not 'all'"
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    if [[ -z "${target}" ]]; then
+        show_tail_help
+        return 1
+    fi
+    local log="${LOG_DIR}/${target}.log"
+    if [[ ! -f "${log}" ]]; then
+        print -u2 "no log at ${log}"
+        return 1
+    fi
+    tail -f "${log}"
+}
+
+cmd_config() {
+    while (( $# )); do
+        case "$1" in
+            -h|--help) show_config_help; return 0 ;;
+            *) print -u2 "unknown flag: $1"; show_config_help; return 1 ;;
+        esac
+    done
+
+    # Apply profile resolution so the printed model/draft reflect what
+    # `start` would actually use. Surfaces unknown-profile errors here too.
+    resolve_chat_profile || return 1
+
+    local cfg_status="not present"
+    [[ -f "${MLX_CONFIG_FILE}" ]] && cfg_status="loaded"
+
+    _val() { [[ -z "$1" ]] && print "(server default)" || print "$1" }
+    _bool() { [[ "$1" == "1" ]] && print "yes" || print "no" }
+    _gb() { printf "%.1f GB" $(( ${1:-0} / 1073741824.0 )) }
+
+    cat <<EOF
+config file:      ${MLX_CONFIG_FILE}  (${cfg_status})
+mlx_lm binary:    ${MLX_LM_BIN}
+mlx_vlm binary:   ${MLX_VLM_BIN}
+launcher shim:    ${MLX_LAUNCHER}
+log dir:          ${LOG_DIR}
+
+shared
+  host:                       ${HOST}
+  allowed origins:            $(_val "${ALLOWED_ORIGINS}")
+
+chat profiles
+  default:                    $(_val "${CHAT_PROFILE_DEFAULT}")
+EOF
+    local _k _engine
+    for _k in "${(@k)CHAT_MODEL_PROFILES}"; do
+        _engine="${CHAT_ENGINE_PROFILES[$_k]:-${CHAT_ENGINE}}"
+        printf "  %-26s %s\n" "${_k}:" "${CHAT_MODEL_PROFILES[$_k]}"
+        printf "  %-26s draft  = %s\n" "" "${CHAT_DRAFT_PROFILES[$_k]:-<none>}"
+        printf "  %-26s engine = %s\n" "" "${_engine}"
+    done
+    cat <<EOF
+
+chat (${CHAT_NAME})
+  engine:                     ${CHAT_ENGINE}
+  active profile:             $(_val "${CHAT_PROFILE:-${CHAT_PROFILE_DEFAULT}}")
+  model:                      ${CHAT_MODEL}
+  port:                       ${CHAT_PORT}
+  draft model:                $(_val "${CHAT_DRAFT_MODEL}")
+  draft tokens (k):           $(_val "${CHAT_NUM_DRAFT_TOKENS}")
+  cache size (seq):           ${CHAT_PROMPT_CACHE_SIZE}
+  cache bytes:                ${CHAT_PROMPT_CACHE_BYTES} ($(_gb "${CHAT_PROMPT_CACHE_BYTES}"))
+  adapter path:               $(_val "${CHAT_ADAPTER_PATH}")
+  log level:                  $(_val "${CHAT_LOG_LEVEL}")
+  chat template:              $(_val "${CHAT_CHAT_TEMPLATE}")
+  use default chat template:  $(_bool "${CHAT_USE_DEFAULT_CHAT_TEMPLATE}")
+  chat template args:         $(_val "${CHAT_CHAT_TEMPLATE_ARGS}")
+  trust remote code:          $(_bool "${CHAT_TRUST_REMOTE_CODE}")
+  default temp:               $(_val "${CHAT_DEFAULT_TEMP}")
+  default top-p:              $(_val "${CHAT_DEFAULT_TOP_P}")
+  default top-k:              $(_val "${CHAT_DEFAULT_TOP_K}")
+  default min-p:              $(_val "${CHAT_DEFAULT_MIN_P}")
+  default max-tokens:         $(_val "${CHAT_DEFAULT_MAX_TOKENS}")
+  prefill step size:          $(_val "${CHAT_PREFILL_STEP_SIZE}")
+  decode concurrency:         $(_val "${CHAT_DECODE_CONCURRENCY}")
+  prompt concurrency:         $(_val "${CHAT_PROMPT_CONCURRENCY}")
+  cache limit (allocator):    $(_val "${CHAT_CACHE_LIMIT_BYTES}") ($(_gb "${CHAT_CACHE_LIMIT_BYTES:-0}"))
+  memory limit (hard cap):    $(_val "${CHAT_MEMORY_LIMIT_BYTES}") ($(_gb "${CHAT_MEMORY_LIMIT_BYTES:-0}"))
+  janitor interval (sec):     $(_val "${CHAT_CACHE_CLEAR_INTERVAL_SEC}")
+  janitor threshold:          $(_val "${CHAT_CACHE_CLEAR_THRESHOLD_BYTES}") ($(_gb "${CHAT_CACHE_CLEAR_THRESHOLD_BYTES:-0}"))
+  memlog interval (sec):      $(_val "${CHAT_MEMORY_LOG_INTERVAL_SEC}")
+  KV headroom (above model):  $(_val "${CHAT_KV_HEADROOM_BYTES}") ($(_gb "${CHAT_KV_HEADROOM_BYTES:-0}"))
+  watchdog check interval:    $(_val "${CHAT_ACTIVE_MEMORY_CHECK_INTERVAL_SEC}")
+  watchdog grace (sec):       $(_val "${CHAT_ACTIVE_MEMORY_GRACE_SEC}")
+
+tags (${TAGS_NAME})
+  engine:                     ${TAGS_ENGINE}
+  model:                      ${TAGS_MODEL}
+  port:                       ${TAGS_PORT}
+  draft model:                $(_val "${TAGS_DRAFT_MODEL}")
+  draft tokens (k):           $(_val "${TAGS_NUM_DRAFT_TOKENS}")
+  cache size (seq):           ${TAGS_PROMPT_CACHE_SIZE}
+  cache bytes:                ${TAGS_PROMPT_CACHE_BYTES} ($(_gb "${TAGS_PROMPT_CACHE_BYTES}"))
+  adapter path:               $(_val "${TAGS_ADAPTER_PATH}")
+  log level:                  $(_val "${TAGS_LOG_LEVEL}")
+  chat template:              $(_val "${TAGS_CHAT_TEMPLATE}")
+  use default chat template:  $(_bool "${TAGS_USE_DEFAULT_CHAT_TEMPLATE}")
+  chat template args:         $(_val "${TAGS_CHAT_TEMPLATE_ARGS}")
+  trust remote code:          $(_bool "${TAGS_TRUST_REMOTE_CODE}")
+  default temp:               $(_val "${TAGS_DEFAULT_TEMP}")
+  default top-p:              $(_val "${TAGS_DEFAULT_TOP_P}")
+  default top-k:              $(_val "${TAGS_DEFAULT_TOP_K}")
+  default min-p:              $(_val "${TAGS_DEFAULT_MIN_P}")
+  default max-tokens:         $(_val "${TAGS_DEFAULT_MAX_TOKENS}")
+  prefill step size:          $(_val "${TAGS_PREFILL_STEP_SIZE}")
+  decode concurrency:         $(_val "${TAGS_DECODE_CONCURRENCY}")
+  prompt concurrency:         $(_val "${TAGS_PROMPT_CONCURRENCY}")
+  cache limit (allocator):    $(_val "${TAGS_CACHE_LIMIT_BYTES}") ($(_gb "${TAGS_CACHE_LIMIT_BYTES:-0}"))
+  memory limit (hard cap):    $(_val "${TAGS_MEMORY_LIMIT_BYTES}") ($(_gb "${TAGS_MEMORY_LIMIT_BYTES:-0}"))
+  janitor interval (sec):     $(_val "${TAGS_CACHE_CLEAR_INTERVAL_SEC}")
+  janitor threshold:          $(_val "${TAGS_CACHE_CLEAR_THRESHOLD_BYTES}") ($(_gb "${TAGS_CACHE_CLEAR_THRESHOLD_BYTES:-0}"))
+  memlog interval (sec):      $(_val "${TAGS_MEMORY_LOG_INTERVAL_SEC}")
+  KV headroom (above model):  $(_val "${TAGS_KV_HEADROOM_BYTES}") ($(_gb "${TAGS_KV_HEADROOM_BYTES:-0}"))
+  watchdog check interval:    $(_val "${TAGS_ACTIVE_MEMORY_CHECK_INTERVAL_SEC}")
+  watchdog grace (sec):       $(_val "${TAGS_ACTIVE_MEMORY_GRACE_SEC}")
+
+embed (${EMBED_NAME})
+  model:                      ${EMBED_MODEL}
+  port:                       ${EMBED_PORT}
+  script:                     ${EMBED_SCRIPT}
+
+tts (${TTS_NAME})
+  model:                      ${TTS_MODEL}
+  extra models:               $(_val "${TTS_EXTRA_MODELS}")
+  port:                       ${TTS_PORT}
+  bin:                        ${TTS_BIN}
+
+kokoro (${KOKORO_NAME})
+  model:                      ${KOKORO_MODEL}
+  port:                       ${KOKORO_PORT}
+  bin:                        ${KOKORO_BIN}
+EOF
+}
+
+# Stream a chat-completion request to a running mlx server.
+# Args: NAME PORT FALLBACK_MODEL_PATH PROMPT
+# - reads the actual --model from the running process so it works regardless
+#   of which profile is loaded; falls back to FALLBACK_MODEL_PATH if the
+#   process can't be inspected (e.g. server not running).
+_send_chat_request() {
+    local name="$1" port="$2" fallback="$3" prompt="$4"
+    local pidfile="${LOG_DIR}/${name}.pid" model=""
+    if [[ -f "${pidfile}" ]]; then
+        local pid
+        pid="$(<"${pidfile}")"
+        if kill -0 "${pid}" 2>/dev/null; then
+            local cmd
+            cmd="$(ps -p "${pid}" -o command= 2>/dev/null)"
+            model="${cmd##*--model }"
+            model="${model%% *}"
+        fi
+    fi
+    [[ -z "${model}" ]] && model="${fallback}"
+    if [[ -z "${model}" ]]; then
+        print -u2 "ERROR: ${name} server not running and no fallback model"
+        return 1
+    fi
+    python3 -u - "http://${HOST}:${port}/v1/chat/completions" "${model}" "${prompt}" <<'PY'
+import json, sys, urllib.request
+url, model, prompt = sys.argv[1], sys.argv[2], sys.argv[3]
+body = json.dumps({
+    "model": model,
+    "max_tokens": 500,
+    "stream": True,
+    "messages": [{"role": "user", "content": prompt}],
+}).encode()
+req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=300) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            tok = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+            if tok:
+                sys.stdout.write(tok)
+                sys.stdout.flush()
+    print()
+except urllib.error.HTTPError as e:
+    sys.stderr.write(f"ERROR: HTTP {e.code} {e.reason}: {e.read().decode('utf-8','replace')[:300]}\n")
+    sys.exit(1)
+except Exception as e:
+    sys.stderr.write(f"ERROR: {e!r}\n")
+    sys.exit(1)
+PY
+}
+
+cmd_chat() {
+    case "${1:-}" in
+        -h|--help) show_chat_help; return 0 ;;
+        "") show_chat_help; return 1 ;;
+    esac
+    local prompt
+    if [[ "$1" == @* ]]; then
+        local file="${1#@}"
+        file="${file/#\~/${HOME}}"
+        if [[ ! -f "${file}" ]]; then
+            print -u2 "ERROR: file not found: ${file}"
+            return 1
+        fi
+        prompt="$(<"${file}")"
+    else
+        prompt="$*"
+    fi
+    _send_chat_request "${CHAT_NAME}" "${CHAT_PORT}" "${CHAT_MODEL}" "${prompt}"
+}
+
+cmd_tags() {
+    case "${1:-}" in
+        -h|--help) show_tags_help; return 0 ;;
+        "") show_tags_help; return 1 ;;
+    esac
+    local prompt="$*"
+    _send_chat_request "${TAGS_NAME}" "${TAGS_PORT}" "${TAGS_MODEL}" "${prompt}"
+}
+
+cmd_tag() {
+    case "${1:-}" in
+        -h|--help) show_tag_help; return 0 ;;
+        "") show_tag_help; return 1 ;;
+    esac
+    local image="${1/#\~/${HOME}}"
+    if [[ ! -f "${image}" ]]; then
+        print -u2 "ERROR: image not found: ${image}"
+        return 1
+    fi
+    _send_image_tag_request "${TAGS_NAME}" "${TAGS_PORT}" "${TAGS_MODEL}" "${image:A}"
+}
+
+# Send an image to the tags server and stream booru-style positive/negative
+# tags to stdout. Image is sent as a base64 data URL inside an OpenAI-style
+# multimodal content array, which mlx_vlm.server accepts.
+_send_image_tag_request() {
+    local name="$1" port="$2" fallback="$3" image="$4"
+    local pidfile="${LOG_DIR}/${name}.pid" model=""
+    if [[ -f "${pidfile}" ]]; then
+        local pid
+        pid="$(<"${pidfile}")"
+        if kill -0 "${pid}" 2>/dev/null; then
+            local cmd
+            cmd="$(ps -p "${pid}" -o command= 2>/dev/null)"
+            model="${cmd##*--model }"
+            model="${model%% *}"
+        fi
+    fi
+    [[ -z "${model}" ]] && model="${fallback}"
+    if [[ -z "${model}" ]]; then
+        print -u2 "ERROR: ${name} server not running and no fallback model"
+        return 1
+    fi
+    python3 -u - "http://${HOST}:${port}/v1/chat/completions" "${model}" "${image}" <<'PY'
+import base64, json, mimetypes, sys, urllib.request
+
+url, model, image_path = sys.argv[1], sys.argv[2], sys.argv[3]
+mime, _ = mimetypes.guess_type(image_path)
+if not mime or not mime.startswith("image/"):
+    mime = "image/jpeg"
+with open(image_path, "rb") as f:
+    b64 = base64.b64encode(f.read()).decode("ascii")
+data_url = f"data:{mime};base64,{b64}"
+
+prompt = (
+    "Generate exhaustive booru-style tags for this image, suitable as "
+    "Stable Diffusion conditioning. Be granular and specific: each "
+    "distinct visual element gets its own tag. Aim for 60 to 120 positive "
+    "tags. Use lowercase, underscores instead of spaces where idiomatic "
+    "(e.g. red_hair, looking_at_viewer).\n\n"
+    "Cover every applicable category:\n"
+    "  - subject count and type (e.g. 1girl, 1boy, solo, multiple_people)\n"
+    "  - body and build: body_type (slim, athletic, curvy, petite, muscular, plump), height impression, age range, body proportions, body posture\n"
+    "  - chest and torso: bust size (small_breasts, medium_breasts, large_breasts, flat_chest), cleavage, sideboob, underboob, navel, midriff, abs, ribs, shoulders, collarbone, back\n"
+    "  - waist, hips, butt, thigh and leg detail: wide_hips, narrow_waist, thick_thighs, thigh_gap, long_legs, calves, ankles, bare_legs, crossed_legs\n"
+    "  - arms and hands: arm position, bare_arms, forearms, wrist, hand_pose, finger position, fingernails, nail_polish, rings, bracelets\n"
+    "  - feet: barefoot, toes, toenails, foot_pose\n"
+    "  - skin: skin_tone (pale, fair, tan, dark, olive), skin_texture, freckles, moles, beauty_mark, tan_lines, scars, tattoos, piercings, blush, sweat\n"
+    "  - face and head: face_shape (round, oval, heart-shaped), jawline, cheekbones, nose, ears, dimples, double_chin if present\n"
+    "  - hair: color (including streaks, highlights, ombre, two-tone), length (short, shoulder-length, waist-length), texture (straight, wavy, curly), styling (ponytail, twintails, braid, bun, bangs, side-swept, hair_over_one_eye), hair_ornament\n"
+    "  - eyes: color, shape (almond, round, narrow), eyelashes, eyeshadow, eyeliner, mascara, eye_contact / gaze direction\n"
+    "  - mouth and lips: lip color, lip_gloss, lipstick, teeth, tongue, parted_lips, open_mouth, smile, smirk, grin, neutral_expression\n"
+    "  - expression and emotion: confident, shy, seductive, neutral, happy, etc.\n"
+    "  - clothing: each garment, color, fabric (sheer, denim, leather, silk), fit (tight, loose, oversized), state (unbuttoned, off-shoulder, rolled-up), accessories, jewelry, headwear, footwear\n"
+    "  - pose and action: full pose tag plus component tags (standing, sitting, leaning, arms_crossed, hands_on_hips, hand_on_chin)\n"
+    "  - framing: shot type (close-up, cowboy_shot, full_body, portrait, upper_body), angle (from_above, from_below, dutch_angle, side_view, three-quarter_view), depth_of_field\n"
+    "  - environment: indoor/outdoor, location, props, background objects, time_of_day, weather\n"
+    "  - lighting: source, direction, mood (rim_lighting, soft_lighting, harsh_shadows, golden_hour, backlit)\n"
+    "  - color palette and dominant hues\n"
+    "  - art style: photorealistic, anime, oil_painting, watercolor, 3d_render, line_art, etc.\n"
+    "  - quality modifiers: masterpiece, highly_detailed, sharp_focus, 8k, etc. (only if warranted)\n\n"
+    "For body detail, do not skip tags just because they feel obvious or "
+    "redundant; SD conditioning improves with more specific tags. If a "
+    "category is genuinely not applicable (e.g. feet not visible), omit "
+    "it silently, do not say 'not_visible'.\n\n"
+    "For negative tags, list common artifacts and undesired qualities to "
+    "block in a regeneration: blurry, low_quality, jpeg_artifacts, "
+    "watermark, signature, text, deformed, extra_limbs, missing_fingers, "
+    "bad_anatomy, bad_hands, bad_feet, bad_proportions, etc., plus "
+    "anything specifically wrong in this image you would NOT want "
+    "repeated. Aim for 20 to 40 negative tags.\n\n"
+    "Respond with exactly two lines and nothing else:\n"
+    "Positive: <comma-separated tags>\n"
+    "Negative: <comma-separated tags>\n"
+    "No prose, no preamble, no markdown, no numbering, no duplicates."
+)
+
+body = json.dumps({
+    "model": model,
+    "max_tokens": 2000,
+    "temperature": 0.3,
+    "repetition_penalty": 1.05,
+    "stream": True,
+    "messages": [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    }],
+}).encode()
+req = urllib.request.Request(url, data=body,
+                             headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=600) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            tok = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+            if tok:
+                sys.stdout.write(tok)
+                sys.stdout.flush()
+    print()
+except urllib.error.HTTPError as e:
+    sys.stderr.write(f"ERROR: HTTP {e.code} {e.reason}: {e.read().decode('utf-8','replace')[:300]}\n")
+    sys.exit(1)
+except Exception as e:
+    sys.stderr.write(f"ERROR: {e!r}\n")
+    sys.exit(1)
+PY
+}
+
+# ============================================================================
+# Router (proxy that swaps chat model on demand based on request `model` field)
+# ============================================================================
+_router_profile_csv() {
+    # Build comma-separated list of registered chat profiles for the router.
+    local k out=""
+    for k in "${(@k)CHAT_MODEL_PROFILES}"; do
+        [[ -n "${out}" ]] && out="${out},${k}"
+        [[ -z "${out}" ]] && out="${k}"
+    done
+    print -- "${out}"
+}
+
+_router_statics_csv() {
+    # User-supplied ROUTER_STATICS wins.
+    [[ -n "${ROUTER_STATICS}" ]] && { print -- "${ROUTER_STATICS}"; return; }
+    local out=""
+    local tags_alias="${ROUTER_TAGS_ALIAS:-${TAGS_MODEL:t}}"
+    if [[ -n "${TAGS_PORT}" && -n "${tags_alias}" ]]; then
+        out="${tags_alias}=http://${MLX_HOST}:${TAGS_PORT}"
+    fi
+    if [[ -n "${EMBED_PORT}" && -n "${ROUTER_EMBED_ALIAS}" ]]; then
+        [[ -n "${out}" ]] && out="${out},"
+        out="${out}${ROUTER_EMBED_ALIAS}=http://${MLX_HOST}:${EMBED_PORT}"
+    fi
+    local tts_alias="${ROUTER_TTS_ALIAS:-${TTS_MODEL:t}}"
+    if [[ -n "${TTS_PORT}" && -n "${tts_alias}" && -n "${TTS_MODEL}" ]]; then
+        [[ -n "${out}" ]] && out="${out},"
+        # Explicit upstream since mlx_audio.server has no --model flag for the
+        # router to auto-detect via lsof+ps.
+        out="${out}${tts_alias}=http://${MLX_HOST}:${TTS_PORT}|${TTS_MODEL}"
+    fi
+    # Extra TTS models share the same server; register one static per path so
+    # the router can route by basename alias and rewrite the body's `model`
+    # field to the upstream id mlx_audio.server expects.
+    if [[ -n "${TTS_PORT}" && -n "${TTS_EXTRA_MODELS}" ]]; then
+        local extra
+        for extra in ${(s:,:)TTS_EXTRA_MODELS}; do
+            extra="${extra## }"; extra="${extra%% }"
+            [[ -z "${extra}" ]] && continue
+            [[ -n "${out}" ]] && out="${out},"
+            out="${out}${extra:t}=http://${MLX_HOST}:${TTS_PORT}|${extra}"
+        done
+    fi
+    # Kokoro lives in its own mlx_audio.server on KOKORO_PORT.
+    if [[ -n "${KOKORO_PORT}" && -n "${KOKORO_MODEL}" ]]; then
+        [[ -n "${out}" ]] && out="${out},"
+        out="${out}${KOKORO_MODEL:t}=http://${MLX_HOST}:${KOKORO_PORT}|${KOKORO_MODEL}"
+    fi
+    print -- "${out}"
+}
+
+_router_start() {
+    [[ -f "${ROUTER_SCRIPT}" ]] || {
+        print -u2 "ERROR: router script missing: ${ROUTER_SCRIPT}"
+        return 1
+    }
+    local pidfile="${LOG_DIR}/${ROUTER_NAME}.pid"
+    local log="${LOG_DIR}/${ROUTER_NAME}.log"
+    if [[ -f "${pidfile}" ]] && kill -0 "$(<"${pidfile}")" 2>/dev/null; then
+        print ">>> ${ROUTER_NAME} already running (pid $(<"${pidfile}"))"
+        return 0
+    fi
+    local profiles statics
+    profiles="$(_router_profile_csv)"
+    statics="$(_router_statics_csv)"
+    local ports="${ROUTER_PORT}"
+    [[ -n "${ROUTER_EXTRA_PORTS}" ]] && ports="${ports}, ${ROUTER_EXTRA_PORTS}"
+    print ">>> Starting ${ROUTER_NAME}"
+    print "    listen:   ${ROUTER_HOST} on ports ${ports}"
+    print "    backend:  http://${MLX_HOST}:${CHAT_PORT}"
+    print "    profiles: ${profiles}"
+    print "    statics:  ${statics:-(none)}"
+    nohup env \
+        ROUTER_HOST="${ROUTER_HOST}" \
+        ROUTER_PORT="${ROUTER_PORT}" \
+        ROUTER_EXTRA_PORTS="${ROUTER_EXTRA_PORTS}" \
+        BACKEND_URL="http://${MLX_HOST}:${CHAT_PORT}" \
+        ROUTER_PROFILES="${profiles}" \
+        ROUTER_STATICS="${statics}" \
+        ROUTER_SWITCH_TIMEOUT="${ROUTER_SWITCH_TIMEOUT}" \
+        MLX_SERVERS_CMD="${MLX_SCRIPT_PATH}" \
+        ROUTER_LOG_LEVEL="${ROUTER_LOG_LEVEL}" \
+        "${MLX_PY}" "${ROUTER_SCRIPT}" >"${log}" 2>&1 &!
+    print "$!" >"${pidfile}"
+    print "    pid: $(<"${pidfile}")"
+    print "    log: ${log}"
+}
+
+_router_stop() {
+    stop_one "${ROUTER_NAME}"
+}
+
+_router_status() {
+    local pidfile="${LOG_DIR}/${ROUTER_NAME}.pid"
+    if [[ ! -f "${pidfile}" ]] || ! kill -0 "$(<"${pidfile}")" 2>/dev/null; then
+        print "${_C_YELLOW}●${_C_RESET} ${_C_BOLD}${ROUTER_NAME}${_C_RESET} — inactive"
+        return 0
+    fi
+    local pid="$(<"${pidfile}")"
+    print "${_C_GREEN}●${_C_RESET} ${_C_BOLD}${ROUTER_NAME}${_C_RESET} — active"
+    local ports="${ROUTER_PORT}"
+    [[ -n "${ROUTER_EXTRA_PORTS}" ]] && ports="${ports}, ${ROUTER_EXTRA_PORTS}"
+    printf "       %s%-9s%s %s\n" "${_C_DIM}" "Listen:"  "${_C_RESET}" "${ROUTER_HOST}:${ports}"
+    printf "       %s%-9s%s %s\n" "${_C_DIM}" "Backend:" "${_C_RESET}" "http://${MLX_HOST}:${CHAT_PORT}"
+    printf "       %s%-9s%s %s\n" "${_C_DIM}" "PID:"     "${_C_RESET}" "${pid}"
+    # Live state from /router/health
+    if command -v curl >/dev/null 2>&1; then
+        local health
+        health=$(curl -s --max-time 2 "http://${ROUTER_HOST}:${ROUTER_PORT}/router/health" 2>/dev/null)
+        if [[ -n "${health}" ]]; then
+            local loaded statics
+            loaded=$(/usr/bin/python3 -c "import json,sys;print(json.loads(sys.stdin.read()).get('loaded_model') or '')" <<<"${health}" 2>/dev/null)
+            [[ -n "${loaded}" ]] && printf "       %s%-9s%s %s\n" "${_C_DIM}" "Loaded:" "${_C_RESET}" "${loaded}"
+            statics=$(/usr/bin/python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read()).get('statics') or []
+for s in data:
+    flag = 'ok' if s.get('healthy') else 'down'
+    print(f\"  {s['name']:14s} {flag:4s} {s['url']}  upstream={s.get('upstream_model') or '?'}\")
+" <<<"${health}" 2>/dev/null)
+            if [[ -n "${statics}" ]]; then
+                printf "       %s%-9s%s\n" "${_C_DIM}" "Statics:" "${_C_RESET}"
+                print -- "${statics}" | sed 's/^/     /'
+            fi
+        fi
+    fi
+}
+
+cmd_router() {
+    local sub="${1:-status}"
+    (( $# )) && shift
+    case "${sub}" in
+        start)   _router_start "$@" ;;
+        stop)    _router_stop  "$@" ;;
+        restart) _router_stop; sleep 1; _router_start "$@" ;;
+        status)  _router_status "$@" ;;
+        log)     [[ -f "${LOG_DIR}/${ROUTER_NAME}.log" ]] && tail -f "${LOG_DIR}/${ROUTER_NAME}.log" || print -u2 "no log yet" ;;
+        -h|--help|help)
+            print "Usage: mlx router {start|stop|restart|status|log}"
+            print
+            print "OpenAI-compatible proxy that fronts the chat server (swap on \`model\` field)"
+            print "plus the tags and embed servers (static passthrough). Aggregates /v1/models"
+            print "across all three. Listens on \$ROUTER_PORT (default 8080); add more ports"
+            print "via \$ROUTER_EXTRA_PORTS (comma-separated)."
+            print
+            print "Point SillyTavern's API URL at http://${ROUTER_HOST}:${ROUTER_PORT}/v1"
+            print "and set \"model\" in your connection profile to one of the chat profiles:"
+            local k
+            for k in "${(@k)CHAT_MODEL_PROFILES}"; do print "  ${k}"; done | sort
+            print
+            print "Or one of the static aliases:"
+            print "  ${ROUTER_TAGS_ALIAS:-${TAGS_MODEL:t}}  (tags, port ${TAGS_PORT})"
+            print "  ${ROUTER_EMBED_ALIAS}  (embed, port ${EMBED_PORT})"
+            ;;
+        *) print -u2 "unknown router subcommand: ${sub}"; return 1 ;;
+    esac
+}
+
+show_embed_help() {
+    cat <<EOF
+Embedding server (OpenAI-compatible /v1/embeddings).
+
+Model:   ${EMBED_MODEL}
+Port:    ${EMBED_PORT}
+Script:  ${EMBED_SCRIPT}
+
+Managed via the normal start/stop/restart/status/tail commands.
+Point SillyTavern Vector Storage at:
+  source:  vllm
+  API URL: http://${HOST}:${EMBED_PORT}
+  model:   ${EMBED_MODEL}
+EOF
+}
+
+show_tts_help() {
+    cat <<EOF
+TTS server (OpenAI-compatible /v1/audio/speech) backed by mlx_audio.server.
+
+Model:   ${TTS_MODEL}
+Port:    ${TTS_PORT}
+Binary:  ${TTS_BIN}
+
+mlx_audio.server is multi-model and has no --model CLI flag; launch_tts
+preloads TTS_MODEL by POSTing it to /v1/models after the server is up.
+
+Managed via the normal start/stop/restart/status/tail commands. Use
+\`mlx stop tts\`, \`mlx restart tts\`, etc. Override per-run
+with --tts-port; change the model by editing TTS_MODEL in
+\${MLX_CONFIG_FILE:-~/.config/mlx.conf} or via env override.
+
+Endpoint:  POST http://${HOST}:${TTS_PORT}/v1/audio/speech
+Through the router: use the alias "${ROUTER_TTS_ALIAS:-${TTS_MODEL:t}}".
+EOF
+}
+
+show_kokoro_help() {
+    cat <<EOF
+Kokoro TTS server (OpenAI-compatible /v1/audio/speech) backed by
+mlx_audio.server. Pinned to KOKORO_PORT (default ${KOKORO_PORT}) so
+clients hardcoded to the kokoro-fastapi convention find it.
+
+Model:   ${KOKORO_MODEL}
+Port:    ${KOKORO_PORT}
+Binary:  ${KOKORO_BIN}
+
+Endpoint:  POST http://${HOST}:${KOKORO_PORT}/v1/audio/speech
+
+Managed via the normal start/stop/restart/status/tail commands.
+Through the router: use the alias "${KOKORO_MODEL:t}".
+EOF
+}
+
+show_router_help() {
+    cat <<EOF
+OpenAI-compatible proxy that fronts the chat server (swap-on-demand by the
+\`model\` field) plus static tags/embed/tts backends. Aggregates /v1/models
+across all four so clients see the full catalog.
+
+USAGE
+    mlx router {start|stop|restart|status|log}
+
+Listens on \$ROUTER_PORT (default ${ROUTER_PORT}); add more ports via
+\$ROUTER_EXTRA_PORTS (comma-separated). Point SillyTavern's API URL at
+http://${ROUTER_HOST}:${ROUTER_PORT}/v1 and set "model" to a chat profile
+or one of the static aliases (tags, embed, tts).
+EOF
+}
+
+cmd_help() {
+    case "${1:-}" in
+        start)   show_start_help ;;
+        stop)    show_stop_help ;;
+        restart) show_restart_help ;;
+        status)  show_status_help ;;
+        monitor) show_monitor_help ;;
+        tail)    show_tail_help ;;
+        config)  show_config_help ;;
+        chat)    show_chat_help ;;
+        tags)    show_tags_help ;;
+        tag)     show_tag_help ;;
+        embed)   show_embed_help ;;
+        tts)     show_tts_help ;;
+        kokoro)  show_kokoro_help ;;
+        router)  show_router_help ;;
+        ""|help) show_root_help ;;
+        *) print -u2 "unknown command: $1"; show_root_help; return 1 ;;
+    esac
+}
+
+# ============================================================================
+# Dispatch
+# ============================================================================
+main() {
+    local cmd="${1:-}"
+    (( $# )) && shift
+
+    case "${cmd}" in
+        ""|-h|--help|help) cmd_help "$@" ;;
+        start)   cmd_start   "$@" ;;
+        stop)    cmd_stop    "$@" ;;
+        restart) cmd_restart "$@" ;;
+        status)  cmd_status  "$@" ;;
+        monitor) cmd_monitor "$@" ;;
+        tail)    cmd_tail    "$@" ;;
+        config)  cmd_config  "$@" ;;
+        chat)    cmd_chat    "$@" ;;
+        tags)    cmd_tags    "$@" ;;
+        tag)     cmd_tag     "$@" ;;
+        router)  cmd_router  "$@" ;;
+        *) print -u2 "unknown command: ${cmd}"; show_root_help; exit 1 ;;
+    esac
+}
+
+main "$@"
