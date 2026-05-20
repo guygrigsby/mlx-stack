@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +11,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/guygrigsby/mlx-stack/internal/config"
+	"github.com/spf13/cobra"
 )
 
 // vlmModelTypes: substrings in model_type that signal a vision-language model.
@@ -29,144 +29,161 @@ var embedModelTypes = []string{"bert", "roberta", "distilbert", "mpnet", "nomic_
 // audioModelTypes: known TTS/audio model_type strings.
 var audioModelTypes = []string{"omnivoice", "kokoro"}
 
-// cmdAdd registers a single backend in the config. The argument is either a
+// newAddCmd registers a single backend in the config. The argument is either a
 // local model directory or a Hugging Face repo id (org/repo).
-func cmdAdd(args []string) {
-	fs := flag.NewFlagSet("add", flag.ExitOnError)
-	name := fs.String("name", "", "backend name (default: sanitized last path segment)")
-	engine := fs.String("engine", "", "lm|vlm|embed|audio (default: auto-detect via config.json model_type)")
-	mode := fs.String("mode", "", "swap|persistent (default: swap for lm/vlm, persistent for embed/audio)")
-	group := fs.String("group", "", "swap group (default: chat for swap, name for persistent)")
-	host := fs.String("host", "127.0.0.1", "host")
-	port := fs.Int("port", 0, "port (required for new persistent backends; new swap groups need --port too)")
-	def := fs.Bool("default", false, "mark as default member of its swap group")
-	draft := fs.String("draft", "", "draft model path (engine=lm only)")
-	noDownload := fs.Bool("no-download", false, "for HF args: do not pre-download; let mlx_lm fetch lazily")
-	configPath := fs.String("config", defaultConfigPathLocal(), "config.toml to modify")
-	fs.Parse(args)
+func newAddCmd() *cobra.Command {
+	var (
+		name       string
+		engine     string
+		mode       string
+		group      string
+		host       string
+		port       int
+		def        bool
+		draft      string
+		noDownload bool
+		configPath string
+	)
+	cmd := &cobra.Command{
+		Use:   "add <path-or-hf-repo>",
+		Short: "Register a backend (downloads HF repos to models_root)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			arg := args[0]
 
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: mlxctl add <path-or-hf-repo> [flags]")
-		os.Exit(2)
-	}
-	arg := fs.Arg(0)
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "load config:", err)
-		os.Exit(1)
-	}
+			modelDir, modelRef, err := resolveModelArg(arg, cfg, noDownload)
+			if err != nil {
+				return err
+			}
 
-	modelDir, modelRef, err := resolveModelArg(arg, cfg, *noDownload)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+			spec := buildSpec(modelDir, modelRef, name, engine, mode, group, host, port, def, draft, cfg)
+			if err := validateNewBackend(spec, cfg); err != nil {
+				return err
+			}
+			if err := appendBackend(configPath, spec); err != nil {
+				return fmt.Errorf("append: %w", err)
+			}
+			fmt.Printf("added [[backend]] name=%q engine=%s mode=%s port=%d → %s\n",
+				spec.Name, spec.Engine, spec.Mode, spec.Port, configPath)
+			return nil
+		},
 	}
-
-	spec := buildSpec(modelDir, modelRef, *name, *engine, *mode, *group, *host, *port, *def, *draft, cfg)
-	if err := validateNewBackend(spec, cfg); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if err := appendBackend(*configPath, spec); err != nil {
-		fmt.Fprintln(os.Stderr, "append:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("added [[backend]] name=%q engine=%s mode=%s port=%d → %s\n",
-		spec.Name, spec.Engine, spec.Mode, spec.Port, *configPath)
+	cmd.Flags().StringVar(&name, "name", "", "backend name (default: sanitized last path segment)")
+	cmd.Flags().StringVar(&engine, "engine", "", "lm|vlm|embed|audio (default: auto-detect via config.json model_type)")
+	cmd.Flags().StringVar(&mode, "mode", "", "swap|persistent (default: swap for lm/vlm, persistent for embed/audio)")
+	cmd.Flags().StringVar(&group, "group", "", "swap group (default: chat for swap, name for persistent)")
+	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host")
+	cmd.Flags().IntVar(&port, "port", 0, "port (required for new persistent backends; new swap groups need --port too)")
+	cmd.Flags().BoolVar(&def, "default", false, "mark as default member of its swap group")
+	cmd.Flags().StringVar(&draft, "draft", "", "draft model path (engine=lm only)")
+	cmd.Flags().BoolVar(&noDownload, "no-download", false, "for HF args: do not pre-download; let mlx_lm fetch lazily")
+	cmd.Flags().StringVar(&configPath, "config", defaultConfigPathLocal(), "config.toml to modify")
+	return cmd
 }
 
-// cmdScan walks a directory of models. With --add, appends missing ones to the config.
-func cmdScan(args []string) {
-	fs := flag.NewFlagSet("scan", flag.ExitOnError)
-	add := fs.Bool("add", false, "append missing entries to the config")
-	configPath := fs.String("config", defaultConfigPathLocal(), "config.toml to read/modify")
-	fs.Parse(args)
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "load config:", err)
-		os.Exit(1)
-	}
-
-	dir := cfg.ModelsRoot
-	if fs.NArg() >= 1 {
-		dir = fs.Arg(0)
-	}
-	if dir == "" {
-		fmt.Fprintln(os.Stderr, "no scan dir (set models_root in config or pass <dir>)")
-		os.Exit(1)
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "read dir:", err)
-		os.Exit(1)
-	}
-
-	// Build a set of model paths already in config for quick membership check.
-	registered := map[string]bool{}
-	for _, b := range cfg.Backends {
-		if b.Model != "" {
-			registered[filepath.Clean(b.Model)] = true
-		}
-	}
-
-	type candidate struct {
-		path, name, engine string
-		inConfig           bool
-	}
-	var cands []candidate
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		p := filepath.Join(dir, e.Name())
-		if _, err := os.Stat(filepath.Join(p, "config.json")); err != nil {
-			continue
-		}
-		eng := detectEngine(p)
-		cands = append(cands, candidate{
-			path:     p,
-			name:     sanitizeName(e.Name()),
-			engine:   eng,
-			inConfig: registered[filepath.Clean(p)],
-		})
-	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].name < cands[j].name })
-
-	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tENGINE\tIN CONFIG\tPATH")
-	added := 0
-	for _, c := range cands {
-		flag := "yes"
-		if !c.inConfig {
-			flag = "no"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.name, defaultStr(c.engine, "?"), flag, c.path)
-		if *add && !c.inConfig {
-			if c.engine == "" {
-				fmt.Fprintf(os.Stderr, "skip %s: could not detect engine (config.json missing model_type?); add manually with --engine\n", c.name)
-				continue
+// newScanCmd walks a directory of models. With --add, appends missing ones to the config.
+func newScanCmd() *cobra.Command {
+	var (
+		add        bool
+		configPath string
+	)
+	cmd := &cobra.Command{
+		Use:   "scan [<dir>]",
+		Short: "List models under a dir; --add appends missing ones",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
 			}
-			spec := buildSpec(c.path, c.path, c.name, c.engine, "", "", "127.0.0.1", 0, false, "", cfg)
-			if err := validateNewBackend(spec, cfg); err != nil {
-				fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
-				continue
+
+			dir := cfg.ModelsRoot
+			if len(args) >= 1 {
+				dir = args[0]
 			}
-			if err := appendBackend(*configPath, spec); err != nil {
-				fmt.Fprintf(os.Stderr, "skip %s: append: %v\n", c.name, err)
-				continue
+			if dir == "" {
+				return fmt.Errorf("no scan dir (set models_root in config or pass <dir>)")
 			}
-			added++
-			// Refresh local view so the next iteration sees this group's port for shared swap members.
-			cfg.Backends = append(cfg.Backends, spec)
-		}
+
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return fmt.Errorf("read dir: %w", err)
+			}
+
+			// Build a set of model paths already in config for quick membership check.
+			registered := map[string]bool{}
+			for _, b := range cfg.Backends {
+				if b.Model != "" {
+					registered[filepath.Clean(b.Model)] = true
+				}
+			}
+
+			type candidate struct {
+				path, name, engine string
+				inConfig           bool
+			}
+			var cands []candidate
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				p := filepath.Join(dir, e.Name())
+				if _, err := os.Stat(filepath.Join(p, "config.json")); err != nil {
+					continue
+				}
+				eng := detectEngine(p)
+				cands = append(cands, candidate{
+					path:     p,
+					name:     sanitizeName(e.Name()),
+					engine:   eng,
+					inConfig: registered[filepath.Clean(p)],
+				})
+			}
+			sort.Slice(cands, func(i, j int) bool { return cands[i].name < cands[j].name })
+
+			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tENGINE\tIN CONFIG\tPATH")
+			added := 0
+			for _, c := range cands {
+				inCfg := "yes"
+				if !c.inConfig {
+					inCfg = "no"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.name, defaultStr(c.engine, "?"), inCfg, c.path)
+				if add && !c.inConfig {
+					if c.engine == "" {
+						fmt.Fprintf(os.Stderr, "skip %s: could not detect engine (config.json missing model_type?); add manually with --engine\n", c.name)
+						continue
+					}
+					spec := buildSpec(c.path, c.path, c.name, c.engine, "", "", "127.0.0.1", 0, false, "", cfg)
+					if err := validateNewBackend(spec, cfg); err != nil {
+						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
+						continue
+					}
+					if err := appendBackend(configPath, spec); err != nil {
+						fmt.Fprintf(os.Stderr, "skip %s: append: %v\n", c.name, err)
+						continue
+					}
+					added++
+					// Refresh local view so the next iteration sees this group's port for shared swap members.
+					cfg.Backends = append(cfg.Backends, spec)
+				}
+			}
+			tw.Flush()
+			if add {
+				fmt.Printf("\nadded %d backend(s) to %s\n", added, configPath)
+			}
+			return nil
+		},
 	}
-	tw.Flush()
-	if *add {
-		fmt.Printf("\nadded %d backend(s) to %s\n", added, *configPath)
-	}
+	cmd.Flags().BoolVar(&add, "add", false, "append missing entries to the config")
+	cmd.Flags().StringVar(&configPath, "config", defaultConfigPathLocal(), "config.toml to read/modify")
+	return cmd
 }
 
 func defaultConfigPathLocal() string {

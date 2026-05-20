@@ -3,55 +3,49 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/guygrigsby/mlx-stack/internal/config"
+	"github.com/spf13/cobra"
 )
 
-func cmdConfig(args []string) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: mlxctl config show [--resolved] [path]")
-		os.Exit(2)
+func newConfigCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Config helpers",
 	}
-	switch args[0] {
-	case "show":
-		cmdConfigShow(args[1:])
-	default:
-		fmt.Fprintf(os.Stderr, "unknown: mlxctl config %s\n", args[0])
-		os.Exit(2)
-	}
+	cmd.AddCommand(newConfigShowCmd())
+	return cmd
 }
 
-func cmdConfigShow(args []string) {
-	path := os.ExpandEnv("$HOME/.config/mlx/config.toml")
-	resolved := false
+func newConfigShowCmd() *cobra.Command {
+	var resolved bool
+	cmd := &cobra.Command{
+		Use:   "show [path]",
+		Short: "Print the current TOML config",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := os.ExpandEnv("$HOME/.config/mlx/config.toml")
+			if len(args) > 0 {
+				path = args[0]
+			}
 
-	for _, a := range args {
-		if a == "--resolved" {
-			resolved = true
-		} else if !strings.HasPrefix(a, "-") {
-			path = a
-		}
-	}
+			if !resolved {
+				b, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				fmt.Print(string(b))
+				return nil
+			}
 
-	if !resolved {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		fmt.Print(string(b))
-		return
+			c, err := config.Load(path)
+			if err != nil {
+				return err
+			}
+			return toml.NewEncoder(os.Stdout).Encode(c)
+		},
 	}
-
-	c, err := config.Load(path)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if err := toml.NewEncoder(os.Stdout).Encode(c); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	cmd.Flags().BoolVar(&resolved, "resolved", false, "load + re-encode with paths expanded")
+	return cmd
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,191 +21,213 @@ import (
 	"github.com/guygrigsby/mlx-stack/internal/obsstate"
 	"github.com/guygrigsby/mlx-stack/internal/router"
 	"github.com/guygrigsby/mlx-stack/internal/supervisor"
+	"github.com/spf13/cobra"
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: mlxd run [--config path] [--socket path] [--log-level lvl] [--log-json] [--log-dir dir]")
-		os.Exit(2)
+	root := &cobra.Command{
+		Use:          "mlxd",
+		Short:        "MLX inference supervisor daemon",
+		SilenceUsage: true,
 	}
-
-	cmdRun := flag.NewFlagSet("run", flag.ExitOnError)
-	cfgPath := cmdRun.String("config", defaultConfigPath(), "path to config.toml")
-	socketPath := cmdRun.String("socket", defaultSocketPath(), "admin unix socket path")
-	logLevel := cmdRun.String("log-level", "info", "debug|info|warn|error")
-	logJSON := cmdRun.Bool("log-json", false, "emit logs as JSON")
-	logDir := cmdRun.String("log-dir", "", "rotated log directory")
-	shimDirFlag := cmdRun.String("shim-dir", "", "directory containing the mlx_stack Python package (overrides auto-detection)")
-	cmdRun.Parse(os.Args[2:])
-
-	shimDir := *shimDirFlag
-	if shimDir == "" {
-		shimDir = detectShimDir()
-	}
-
-	logger, rotator := setupLogger(*logLevel, *logJSON, *logDir)
-	slog.SetDefault(logger)
-	defer func() {
-		if rotator != nil {
-			rotator.Close()
-		}
-	}()
-
-	cfg, err := config.Load(*cfgPath)
-	if err != nil {
-		logger.Error("config load failed", "err", err)
+	root.AddCommand(newRunCmd())
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	logger.Info("config loaded", "path", *cfgPath, "router_port", cfg.Router.Port, "backends", len(cfg.Backends))
+}
 
-	broker := logobs.NewBroker()
-	obsStore := obsstate.New()
-	go obsStore.Run(context.Background(), broker)
-
-	// Build all backends.
-	var backends []bk.Backend
-
-	// 1. Groups (swap-mode collections).
-	groups := cfg.BackendsByGroup()
-	groupBackends := map[string]*supervisor.Group{}
-	for groupName, members := range groups {
-		first := members[0]
-		defaultMember := first.Name
-		memberMap := map[string]config.BackendSpec{}
-		for _, m := range members {
-			memberMap[m.Name] = m
-			if m.Default {
-				defaultMember = m.Name
+func newRunCmd() *cobra.Command {
+	var (
+		cfgPath     string
+		socketPath  string
+		logLevel    string
+		logJSON     bool
+		logDir      string
+		shimDirFlag string
+	)
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run the daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			shimDir := shimDirFlag
+			if shimDir == "" {
+				shimDir = detectShimDir()
 			}
-		}
-		// Capture loop vars in closure-safe locals.
-		gName := groupName
-		mm := memberMap
-		g := supervisor.NewGroup(supervisor.GroupOpts{
-			Name:           gName,
-			Host:           first.Host,
-			Port:           first.Port,
-			Members:        mm,
-			DefaultMember:  defaultMember,
-			SwapTimeoutSec: 90,
-			ProbeInterval:  250 * time.Millisecond,
-			WorkerFactory: func(spec config.BackendSpec) *supervisor.Worker {
-				return supervisor.New(supervisor.WorkerSpec{
-					Name:    fmt.Sprintf("%s[%s]", gName, spec.Name),
-					Command: cfg.PythonBin,
-					Args:    launcherArgs(spec),
-					Env:     backendEnv(spec, cfg.Defaults, shimDir),
-					Broker:  broker,
-					Logger:  logger,
-				})
-			},
-		})
-		groupBackends[groupName] = g
-		backends = append(backends, g)
-	}
 
-	// 2. Persistents.
-	var persistents []*supervisor.Persistent
-	for _, p := range cfg.Persistents() {
-		spec := p
-		pb := supervisor.NewPersistent(supervisor.PersistentOpts{
-			Name:          spec.Name,
-			Engine:        spec.Engine,
-			Host:          spec.Host,
-			Port:          spec.Port,
-			UpstreamModel: spec.Model,
-			Args:          launcherArgs(spec),
-			WorkerFactory: func(args []string) *supervisor.Worker {
-				return supervisor.New(supervisor.WorkerSpec{
-					Name:    spec.Name,
-					Command: cfg.PythonBin,
-					Args:    args,
-					Env:     backendEnv(spec, cfg.Defaults, shimDir),
-					Broker:  broker,
-					Logger:  logger,
-				})
-			},
-		})
-		if err := pb.Start(context.Background()); err != nil {
-			logger.Error("persistent start failed", "name", spec.Name, "err", err)
-			continue
-		}
-		logger.Info("persistent backend up", "name", spec.Name, "url", pb.BaseURL())
-		persistents = append(persistents, pb)
-		backends = append(backends, pb)
-	}
+			logger, rotator := setupLogger(logLevel, logJSON, logDir)
+			slog.SetDefault(logger)
+			defer func() {
+				if rotator != nil {
+					rotator.Close()
+				}
+			}()
 
-	// 3. Externals.
-	for _, e := range cfg.Externals() {
-		ext := supervisor.NewExternal(e.Name, e.URL, e.UpstreamModel)
-		backends = append(backends, ext)
-		logger.Info("external backend", "name", e.Name, "url", e.URL)
-	}
-
-	// Build registry. Register each backend by Name, and each swap-group
-	// member name as an alias for the Group.
-	registry := router.NewRegistry(backends...)
-	for groupName, members := range groups {
-		g := groupBackends[groupName]
-		for _, m := range members {
-			if m.Name != groupName {
-				registry.RegisterAlias(m.Name, g)
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				logger.Error("config load failed", "err", err)
+				return fmt.Errorf("config load failed: %w", err)
 			}
-		}
-	}
+			logger.Info("config loaded", "path", cfgPath, "router_port", cfg.Router.Port, "backends", len(cfg.Backends))
 
-	allNames := cfg.AllNames()
-	routerSrv := router.NewServer(router.ServerOpts{
-		Config:   cfg,
-		Registry: registry,
-		Names:    allNames,
-	})
+			broker := logobs.NewBroker()
+			obsStore := obsstate.New()
+			go obsStore.Run(context.Background(), broker)
 
-	httpSrv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Router.Host, cfg.Router.Port),
-		Handler: routerSrv.Handler(),
-	}
+			// Build all backends.
+			var backends []bk.Backend
 
-	adminSrv := &admin.Server{
-		SocketPath: *socketPath,
-		Handler: (&admin.Handlers{
-			Config:   cfg,
-			Backends: backends,
-			Aliases:  collectAliases(groups, groupBackends),
-			Broker:   broker,
-			ObsStore: obsStore,
-		}).Mux(),
-	}
+			// 1. Groups (swap-mode collections).
+			groups := cfg.BackendsByGroup()
+			groupBackends := map[string]*supervisor.Group{}
+			for groupName, members := range groups {
+				first := members[0]
+				defaultMember := first.Name
+				memberMap := map[string]config.BackendSpec{}
+				for _, m := range members {
+					memberMap[m.Name] = m
+					if m.Default {
+						defaultMember = m.Name
+					}
+				}
+				// Capture loop vars in closure-safe locals.
+				gName := groupName
+				mm := memberMap
+				g := supervisor.NewGroup(supervisor.GroupOpts{
+					Name:           gName,
+					Host:           first.Host,
+					Port:           first.Port,
+					Members:        mm,
+					DefaultMember:  defaultMember,
+					SwapTimeoutSec: 90,
+					ProbeInterval:  250 * time.Millisecond,
+					WorkerFactory: func(spec config.BackendSpec) *supervisor.Worker {
+						return supervisor.New(supervisor.WorkerSpec{
+							Name:    fmt.Sprintf("%s[%s]", gName, spec.Name),
+							Command: cfg.PythonBin,
+							Args:    launcherArgs(spec),
+							Env:     backendEnv(spec, cfg.Defaults, shimDir),
+							Broker:  broker,
+							Logger:  logger,
+						})
+					},
+				})
+				groupBackends[groupName] = g
+				backends = append(backends, g)
+			}
 
-	if err := adminSrv.Start(); err != nil {
-		logger.Error("admin server start", "err", err)
-		os.Exit(1)
-	}
-	logger.Info("admin socket listening", "path", *socketPath)
+			// 2. Persistents.
+			var persistents []*supervisor.Persistent
+			for _, p := range cfg.Persistents() {
+				spec := p
+				pb := supervisor.NewPersistent(supervisor.PersistentOpts{
+					Name:          spec.Name,
+					Engine:        spec.Engine,
+					Host:          spec.Host,
+					Port:          spec.Port,
+					UpstreamModel: spec.Model,
+					Args:          launcherArgs(spec),
+					WorkerFactory: func(args []string) *supervisor.Worker {
+						return supervisor.New(supervisor.WorkerSpec{
+							Name:    spec.Name,
+							Command: cfg.PythonBin,
+							Args:    args,
+							Env:     backendEnv(spec, cfg.Defaults, shimDir),
+							Broker:  broker,
+							Logger:  logger,
+						})
+					},
+				})
+				if err := pb.Start(context.Background()); err != nil {
+					logger.Error("persistent start failed", "name", spec.Name, "err", err)
+					continue
+				}
+				logger.Info("persistent backend up", "name", spec.Name, "url", pb.BaseURL())
+				persistents = append(persistents, pb)
+				backends = append(backends, pb)
+			}
 
-	go func() {
-		logger.Info("router listening", "addr", httpSrv.Addr)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("router serve", "err", err)
-			os.Exit(1)
-		}
-	}()
+			// 3. Externals.
+			for _, e := range cfg.Externals() {
+				ext := supervisor.NewExternal(e.Name, e.URL, e.UpstreamModel)
+				backends = append(backends, ext)
+				logger.Info("external backend", "name", e.Name, "url", e.URL)
+			}
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-	<-stop
-	logger.Info("shutting down")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	for _, g := range groupBackends {
-		_ = g.Stop(ctx)
+			// Build registry. Register each backend by Name, and each swap-group
+			// member name as an alias for the Group.
+			registry := router.NewRegistry(backends...)
+			for groupName, members := range groups {
+				g := groupBackends[groupName]
+				for _, m := range members {
+					if m.Name != groupName {
+						registry.RegisterAlias(m.Name, g)
+					}
+				}
+			}
+
+			allNames := cfg.AllNames()
+			routerSrv := router.NewServer(router.ServerOpts{
+				Config:   cfg,
+				Registry: registry,
+				Names:    allNames,
+			})
+
+			httpSrv := &http.Server{
+				Addr:    fmt.Sprintf("%s:%d", cfg.Router.Host, cfg.Router.Port),
+				Handler: routerSrv.Handler(),
+			}
+
+			adminSrv := &admin.Server{
+				SocketPath: socketPath,
+				Handler: (&admin.Handlers{
+					Config:   cfg,
+					Backends: backends,
+					Aliases:  collectAliases(groups, groupBackends),
+					Broker:   broker,
+					ObsStore: obsStore,
+				}).Mux(),
+			}
+
+			if err := adminSrv.Start(); err != nil {
+				logger.Error("admin server start", "err", err)
+				return fmt.Errorf("admin server start: %w", err)
+			}
+			logger.Info("admin socket listening", "path", socketPath)
+
+			go func() {
+				logger.Info("router listening", "addr", httpSrv.Addr)
+				if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					logger.Error("router serve", "err", err)
+					os.Exit(1)
+				}
+			}()
+
+			stop := make(chan os.Signal, 1)
+			signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+			<-stop
+			logger.Info("shutting down")
+			shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			for _, g := range groupBackends {
+				_ = g.Stop(shutCtx)
+			}
+			for _, p := range persistents {
+				_ = p.Stop(shutCtx)
+			}
+			_ = httpSrv.Shutdown(shutCtx)
+			_ = adminSrv.Shutdown(shutCtx)
+			logger.Info("bye")
+			return nil
+		},
 	}
-	for _, p := range persistents {
-		_ = p.Stop(ctx)
-	}
-	_ = httpSrv.Shutdown(ctx)
-	_ = adminSrv.Shutdown(ctx)
-	logger.Info("bye")
+	cmd.Flags().StringVar(&cfgPath, "config", defaultConfigPath(), "path to config.toml")
+	cmd.Flags().StringVar(&socketPath, "socket", defaultSocketPath(), "admin unix socket path")
+	cmd.Flags().StringVar(&logLevel, "log-level", "info", "debug|info|warn|error")
+	cmd.Flags().BoolVar(&logJSON, "log-json", false, "emit logs as JSON")
+	cmd.Flags().StringVar(&logDir, "log-dir", "", "rotated log directory")
+	cmd.Flags().StringVar(&shimDirFlag, "shim-dir", "", "directory containing the mlx_stack Python package (overrides auto-detection)")
+	return cmd
 }
 
 // collectAliases returns a map of alias-name -> primary-backend-name for swap
@@ -245,6 +266,7 @@ func launcherArgs(spec config.BackendSpec) []string {
 //  1. $MLX_STACK_SHIM_DIR env var.
 //  2. Sibling to the binary: <exe-dir>/../share/mlx-stack/python (brew + make install layout).
 //  3. Repo-local: <cwd>/python (dev mode: `./bin/mlxd run` from repo root).
+//
 // Returns "" if nothing found — workers fall back to whatever's on the venv's sys.path.
 func detectShimDir() string {
 	if v := os.Getenv("MLX_STACK_SHIM_DIR"); v != "" {
