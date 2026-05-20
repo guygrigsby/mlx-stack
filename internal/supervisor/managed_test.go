@@ -1,0 +1,107 @@
+package supervisor
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestManaged_StartProbesUntilReady(t *testing.T) {
+	var started int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	defer upstream.Close()
+
+	port, _ := freePort()
+	m := NewManaged(ManagedOpts{
+		Name:          "tags",
+		Host:          "127.0.0.1",
+		Port:          port,
+		Args:          []string{"--engine", "lm", "--model", "/m"},
+		ProbeInterval: 20 * time.Millisecond,
+		ProbeTimeout:  5 * time.Second,
+		BackoffMin:    50 * time.Millisecond,
+		BackoffMax:    200 * time.Millisecond,
+		WorkerFactory: func(args []string) *Worker {
+			atomic.AddInt32(&started, 1)
+			return New(WorkerSpec{Name: "tags", Command: "/bin/sh", Args: []string{"-c", "sleep 2"}})
+		},
+	})
+	m.upstreamURLOverride = upstream.URL
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop(context.Background())
+	if atomic.LoadInt32(&started) != 1 {
+		t.Errorf("want 1 spawn, got %d", started)
+	}
+	if !m.Running() {
+		t.Errorf("Running() should be true")
+	}
+}
+
+func TestManaged_StopGraceful(t *testing.T) {
+	var started int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	port, _ := freePort()
+	m := NewManaged(ManagedOpts{
+		Name: "tags", Host: "127.0.0.1", Port: port,
+		ProbeInterval: 20 * time.Millisecond, ProbeTimeout: 5 * time.Second,
+		BackoffMin: 50 * time.Millisecond, BackoffMax: 200 * time.Millisecond,
+		WorkerFactory: func(args []string) *Worker {
+			atomic.AddInt32(&started, 1)
+			return New(WorkerSpec{Name: "tags", Command: "/bin/sh", Args: []string{"-c", "trap 'exit 0' TERM; sleep 5"}})
+		},
+	})
+	m.upstreamURLOverride = upstream.URL
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if m.Running() {
+		t.Errorf("Running() should be false after Stop")
+	}
+}
+
+func TestManaged_RestartsOnUnexpectedExit(t *testing.T) {
+	var started int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	port, _ := freePort()
+	m := NewManaged(ManagedOpts{
+		Name: "tags", Host: "127.0.0.1", Port: port,
+		ProbeInterval: 20 * time.Millisecond, ProbeTimeout: 2 * time.Second,
+		BackoffMin: 10 * time.Millisecond, BackoffMax: 50 * time.Millisecond,
+		WorkerFactory: func(args []string) *Worker {
+			atomic.AddInt32(&started, 1)
+			return New(WorkerSpec{Name: "tags", Command: "/bin/sh", Args: []string{"-c", "exit 1"}})
+		},
+	})
+	m.upstreamURLOverride = upstream.URL
+
+	go m.Start(context.Background())
+	time.Sleep(500 * time.Millisecond)
+	m.Stop(context.Background())
+	if atomic.LoadInt32(&started) < 2 {
+		t.Errorf("expected restart, got %d spawns", started)
+	}
+}
