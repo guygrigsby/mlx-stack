@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +17,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "list":
+		cmdStatus(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
 	case "swap":
@@ -51,18 +52,18 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: mlxctl <subcommand>
-  status                       show current backend state
-  monitor                      live-refresh status (every 500ms)
-  tail                         stream structured stderr events from all workers
-  swap <profile>               swap chat profile
-  start chat                   start chat backend (default profile)
-  stop chat                    stop chat backend
-  restart chat                 restart chat backend
-  chat "..."                   send a chat request via the router
-  tags                         list available models
-  health                       daemon liveness check
-  config migrate [src]         migrate ~/.config/mlx.conf to TOML on stdout
-  config show [path]           print config file (--resolved: expand + validate)`)
+  list                      list all configured backends
+  status                    show all backend state
+  start <name>              start/load a backend
+  stop <name>               stop a backend
+  restart <name>            stop then start
+  swap <name>               alias for start
+  monitor                   live-refresh status
+  tail [worker]             stream stderr events (optional worker filter)
+  chat "..."                send a chat request via the router
+  tags                      list available models
+  health                    daemon liveness
+  config migrate|show`)
 }
 
 func newClient() *ipc.Client {
@@ -79,7 +80,7 @@ func ctx() (context.Context, context.CancelFunc) {
 }
 
 func notRunning() {
-	fmt.Fprintln(os.Stderr, "mlxd is not running. Start with: `mlxd run` or `launchctl load …`")
+	fmt.Fprintln(os.Stderr, "mlxd is not running. Start with: `mlxd run` or `launchctl load ...`")
 	os.Exit(2)
 }
 
@@ -106,18 +107,12 @@ func cmdStatus(args []string) {
 }
 
 func cmdSwap(args []string) {
-	fs := flag.NewFlagSet("swap", flag.ExitOnError)
-	fs.Parse(args)
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: mlxctl swap <profile>")
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: mlxctl swap <name>")
 		os.Exit(2)
 	}
-	profile := fs.Arg(0)
-	c := newClient()
-	cx, cancel := ctx()
-	defer cancel()
-	body, _ := json.Marshal(map[string]string{"profile": profile})
-	resp, err := c.PostJSON(cx, "/v1/swap", body)
+	body, _ := json.Marshal(map[string]string{"name": args[0]})
+	resp, err := newClient().PostJSON(context.Background(), "/v1/swap", body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "swap failed: %v\n%s\n", err, resp)
 		os.Exit(1)
@@ -127,14 +122,11 @@ func cmdSwap(args []string) {
 
 func cmdStart(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: mlxctl start <backend>")
+		fmt.Fprintln(os.Stderr, "usage: mlxctl start <name>")
 		os.Exit(2)
 	}
-	c := newClient()
-	cx, cancel := ctx()
-	defer cancel()
-	body, _ := json.Marshal(map[string]string{"backend": args[0]})
-	resp, err := c.PostJSON(cx, "/v1/start", body)
+	body, _ := json.Marshal(map[string]string{"name": args[0]})
+	resp, err := newClient().PostJSON(context.Background(), "/v1/start", body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "start failed: %v\n%s\n", err, resp)
 		os.Exit(1)
@@ -144,14 +136,11 @@ func cmdStart(args []string) {
 
 func cmdStop(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: mlxctl stop <backend>")
+		fmt.Fprintln(os.Stderr, "usage: mlxctl stop <name>")
 		os.Exit(2)
 	}
-	c := newClient()
-	cx, cancel := ctx()
-	defer cancel()
-	body, _ := json.Marshal(map[string]string{"backend": args[0]})
-	resp, err := c.PostJSON(cx, "/v1/stop", body)
+	body, _ := json.Marshal(map[string]string{"name": args[0]})
+	resp, err := newClient().PostJSON(context.Background(), "/v1/stop", body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stop failed: %v\n%s\n", err, resp)
 		os.Exit(1)
@@ -161,14 +150,11 @@ func cmdStop(args []string) {
 
 func cmdRestart(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: mlxctl restart <backend>")
+		fmt.Fprintln(os.Stderr, "usage: mlxctl restart <name>")
 		os.Exit(2)
 	}
-	c := newClient()
-	cx, cancel := ctx()
-	defer cancel()
-	body, _ := json.Marshal(map[string]string{"backend": args[0]})
-	resp, err := c.PostJSON(cx, "/v1/restart", body)
+	body, _ := json.Marshal(map[string]string{"name": args[0]})
+	resp, err := newClient().PostJSON(context.Background(), "/v1/restart", body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "restart failed: %v\n%s\n", err, resp)
 		os.Exit(1)

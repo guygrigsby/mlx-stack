@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/guygrigsby/mlx-stack/internal/admin"
+	bk "github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
 	"github.com/guygrigsby/mlx-stack/internal/logrot"
@@ -33,154 +35,125 @@ func main() {
 	socketPath := cmdRun.String("socket", defaultSocketPath(), "admin unix socket path")
 	logLevel := cmdRun.String("log-level", "info", "debug|info|warn|error")
 	logJSON := cmdRun.Bool("log-json", false, "emit logs as JSON")
-	logDir := cmdRun.String("log-dir", "", "directory for rotating mlxd-YYYY-MM-DD.log files")
+	logDir := cmdRun.String("log-dir", "", "rotated log directory")
 	cmdRun.Parse(os.Args[2:])
 
 	logger, rotator := setupLogger(*logLevel, *logJSON, *logDir)
+	slog.SetDefault(logger)
 	defer func() {
 		if rotator != nil {
 			rotator.Close()
 		}
 	}()
-	slog.SetDefault(logger)
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		logger.Error("config load failed", "err", err)
 		os.Exit(1)
 	}
-	logger.Info("config loaded", "path", *cfgPath, "router_port", cfg.Router.Port, "chat_port", cfg.Chat.Port)
+	logger.Info("config loaded", "path", *cfgPath, "router_port", cfg.Router.Port, "backends", len(cfg.Backends))
 
 	broker := logobs.NewBroker()
 	obsStore := obsstate.New()
 	go obsStore.Run(context.Background(), broker)
 
-	chatSwap := supervisor.NewChatSwap(supervisor.ChatSwapOpts{
-		Host:           cfg.Chat.Host,
-		Port:           cfg.Chat.Port,
-		Profiles:       cfg.Chat.Profiles,
-		DefaultProfile: cfg.Chat.DefaultProfile,
-		SwapTimeoutSec: cfg.Chat.SwapTimeoutSec,
-		WorkerFactory: func(name string, args []string) *supervisor.Worker {
-			return supervisor.New(supervisor.WorkerSpec{
-				Name:    name,
-				Command: cfg.PythonBin,
-				Args:    args,
-				Env:     workerEnv(cfg),
-				Logger:  logger,
-				Broker:  broker,
-			})
-		},
-		WorkerEnv: workerEnv(cfg),
-	})
+	// Build all backends.
+	var backends []bk.Backend
 
-	var tagsMgr *supervisor.Managed
-	if cfg.Tags.Model != "" {
-		tagsMgr = supervisor.NewManaged(supervisor.ManagedOpts{
-			Name:          "tags",
-			Host:          cfg.Tags.Host,
-			Port:          cfg.Tags.Port,
-			Alias:         cfg.Tags.Alias,
-			UpstreamModel: cfg.Tags.Model,
-			Args: []string{
-				"-m", "mlx_stack.launcher_shim",
-				"--engine", cfg.Tags.Engine,
-				"--model", cfg.Tags.Model,
-				"--host", cfg.Tags.Host,
-				"--port", fmt.Sprintf("%d", cfg.Tags.Port),
-			},
-			Env: tagsEnv(cfg),
-			WorkerFactory: func(args []string) *supervisor.Worker {
+	// 1. Groups (swap-mode collections).
+	groups := cfg.BackendsByGroup()
+	groupBackends := map[string]*supervisor.Group{}
+	for groupName, members := range groups {
+		first := members[0]
+		defaultMember := first.Name
+		memberMap := map[string]config.BackendSpec{}
+		for _, m := range members {
+			memberMap[m.Name] = m
+			if m.Default {
+				defaultMember = m.Name
+			}
+		}
+		// Capture loop vars in closure-safe locals.
+		gName := groupName
+		mm := memberMap
+		g := supervisor.NewGroup(supervisor.GroupOpts{
+			Name:           gName,
+			Host:           first.Host,
+			Port:           first.Port,
+			Members:        mm,
+			DefaultMember:  defaultMember,
+			SwapTimeoutSec: 90,
+			ProbeInterval:  250 * time.Millisecond,
+			WorkerFactory: func(spec config.BackendSpec) *supervisor.Worker {
 				return supervisor.New(supervisor.WorkerSpec{
-					Name:    "tags",
+					Name:    fmt.Sprintf("%s[%s]", gName, spec.Name),
 					Command: cfg.PythonBin,
-					Args:    args,
-					Env:     tagsEnv(cfg),
-					Logger:  logger,
+					Args:    launcherArgs(spec),
+					Env:     backendEnv(spec, cfg.Defaults),
 					Broker:  broker,
+					Logger:  logger,
 				})
 			},
 		})
-		if err := tagsMgr.Start(context.Background()); err != nil {
-			logger.Error("tags start failed", "err", err)
-			// don't exit — chat still works
-		} else {
-			logger.Info("tags backend up", "alias", cfg.Tags.Alias, "url", tagsMgr.URL())
-		}
+		groupBackends[groupName] = g
+		backends = append(backends, g)
 	}
 
-	var embedBackend router.ManagedBackend
-	if cfg.Embed.Alias != "" {
-		if cfg.Embed.Managed {
-			em := supervisor.NewManaged(supervisor.ManagedOpts{
-				Name:          "embed",
-				Host:          cfg.Embed.Host,
-				Port:          cfg.Embed.Port,
-				Alias:         cfg.Embed.Alias,
-				UpstreamModel: cfg.Embed.Model,
-				Args: []string{
-					"-m", "mlx_stack.launcher_shim",
-					"--engine", "embed",
-					"--model", cfg.Embed.Model,
-					"--host", cfg.Embed.Host,
-					"--port", fmt.Sprintf("%d", cfg.Embed.Port),
-				},
-				WorkerFactory: func(args []string) *supervisor.Worker {
-					return supervisor.New(supervisor.WorkerSpec{
-						Name: "embed", Command: cfg.PythonBin, Args: args, Logger: logger, Broker: broker,
-					})
-				},
-			})
-			if err := em.Start(context.Background()); err != nil {
-				logger.Error("embed start failed", "err", err)
-			} else {
-				logger.Info("embed backend up", "alias", cfg.Embed.Alias, "url", em.URL())
-				embedBackend = em
+	// 2. Persistents.
+	var persistents []*supervisor.Persistent
+	for _, p := range cfg.Persistents() {
+		spec := p
+		pb := supervisor.NewPersistent(supervisor.PersistentOpts{
+			Name:          spec.Name,
+			Engine:        spec.Engine,
+			Host:          spec.Host,
+			Port:          spec.Port,
+			UpstreamModel: spec.Model,
+			Args:          launcherArgs(spec),
+			WorkerFactory: func(args []string) *supervisor.Worker {
+				return supervisor.New(supervisor.WorkerSpec{
+					Name:    spec.Name,
+					Command: cfg.PythonBin,
+					Args:    args,
+					Env:     backendEnv(spec, cfg.Defaults),
+					Broker:  broker,
+					Logger:  logger,
+				})
+			},
+		})
+		if err := pb.Start(context.Background()); err != nil {
+			logger.Error("persistent start failed", "name", spec.Name, "err", err)
+			continue
+		}
+		logger.Info("persistent backend up", "name", spec.Name, "url", pb.BaseURL())
+		persistents = append(persistents, pb)
+		backends = append(backends, pb)
+	}
+
+	// 3. Externals.
+	for _, e := range cfg.Externals() {
+		ext := supervisor.NewExternal(e.Name, e.URL, e.UpstreamModel)
+		backends = append(backends, ext)
+		logger.Info("external backend", "name", e.Name, "url", e.URL)
+	}
+
+	// Build registry. Register each backend by Name, and each swap-group
+	// member name as an alias for the Group.
+	registry := router.NewRegistry(backends...)
+	for groupName, members := range groups {
+		g := groupBackends[groupName]
+		for _, m := range members {
+			if m.Name != groupName {
+				registry.RegisterAlias(m.Name, g)
 			}
-		} else {
-			embedBackend = supervisor.NewExternalAdapter(cfg.Embed.Alias, cfg.Embed.URL, cfg.Embed.Alias)
-			logger.Info("embed backend (external)", "alias", cfg.Embed.Alias, "url", cfg.Embed.URL)
 		}
 	}
 
-	ttsMgr := buildAudioManaged("tts", cfg.TTS, cfg.PythonBin, logger, broker)
-	if ttsMgr != nil {
-		if err := ttsMgr.Start(context.Background()); err != nil {
-			logger.Error("tts start failed", "err", err)
-			ttsMgr = nil
-		} else {
-			logger.Info("tts backend up", "alias", cfg.TTS.Alias, "url", ttsMgr.URL())
-		}
-	}
-
-	kokoroMgr := buildAudioManaged("kokoro", cfg.Kokoro, cfg.PythonBin, logger, broker)
-	if kokoroMgr != nil {
-		if err := kokoroMgr.Start(context.Background()); err != nil {
-			logger.Error("kokoro start failed", "err", err)
-			kokoroMgr = nil
-		} else {
-			logger.Info("kokoro backend up", "alias", cfg.Kokoro.Alias, "url", kokoroMgr.URL())
-		}
-	}
-
-	var managedBackends []router.ManagedBackend
-	if tagsMgr != nil {
-		managedBackends = append(managedBackends, tagsMgr)
-	}
-	if embedBackend != nil {
-		managedBackends = append(managedBackends, embedBackend)
-	}
-	if ttsMgr != nil {
-		managedBackends = append(managedBackends, ttsMgr)
-	}
-	if kokoroMgr != nil {
-		managedBackends = append(managedBackends, kokoroMgr)
-	}
-	registry := router.NewRegistry(cfg, chatSwap, managedBackends...)
+	allNames := cfg.AllNames()
 	routerSrv := router.NewServer(router.ServerOpts{
 		Config:   cfg,
-		Chat:     chatSwap,
 		Registry: registry,
+		Names:    allNames,
 	})
 
 	httpSrv := &http.Server{
@@ -190,7 +163,13 @@ func main() {
 
 	adminSrv := &admin.Server{
 		SocketPath: *socketPath,
-		Handler:    (&admin.Handlers{Config: cfg, Chat: chatSwap, Tags: tagsMgr, Broker: broker, ObsStore: obsStore}).Mux(),
+		Handler: (&admin.Handlers{
+			Config:   cfg,
+			Backends: backends,
+			Aliases:  collectAliases(groups, groupBackends),
+			Broker:   broker,
+			ObsStore: obsStore,
+		}).Mux(),
 	}
 
 	if err := adminSrv.Start(); err != nil {
@@ -213,104 +192,80 @@ func main() {
 	logger.Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if em, ok := embedBackend.(*supervisor.Managed); ok {
-		_ = em.Stop(ctx)
+	for _, g := range groupBackends {
+		_ = g.Stop(ctx)
 	}
-	if tagsMgr != nil {
-		_ = tagsMgr.Stop(ctx)
+	for _, p := range persistents {
+		_ = p.Stop(ctx)
 	}
-	for _, m := range []*supervisor.Managed{ttsMgr, kokoroMgr} {
-		if m != nil {
-			_ = m.Stop(ctx)
-		}
-	}
-	_ = chatSwap.Stop(ctx)
 	_ = httpSrv.Shutdown(ctx)
 	_ = adminSrv.Shutdown(ctx)
 	logger.Info("bye")
 }
 
-func workerEnv(cfg *config.Config) []string {
-	env := []string{}
-	c := cfg.Chat
-	if c.Cache.LimitBytes > 0 {
-		env = append(env, fmt.Sprintf("MLX_CACHE_LIMIT_BYTES=%d", c.Cache.LimitBytes))
+// collectAliases returns a map of alias-name -> primary-backend-name for swap
+// group members. The admin layer uses it to resolve actions like
+// `mlxctl swap valkyrie` to the chat group.
+func collectAliases(groups map[string][]config.BackendSpec, groupBackends map[string]*supervisor.Group) map[string]string {
+	out := map[string]string{}
+	for groupName, members := range groups {
+		for _, m := range members {
+			if m.Name != groupName {
+				out[m.Name] = groupBackends[groupName].Name()
+			}
+		}
 	}
-	if c.Cache.ClearIntervalSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_INTERVAL_SEC=%d", c.Cache.ClearIntervalSec))
-	}
-	if c.Cache.ClearThresholdBytes > 0 {
-		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_THRESHOLD_BYTES=%d", c.Cache.ClearThresholdBytes))
-	}
-	if c.Watchdog.KVHeadroomBytes > 0 {
-		env = append(env, fmt.Sprintf("MLX_KV_HEADROOM_BYTES=%d", c.Watchdog.KVHeadroomBytes))
-	}
-	if c.Watchdog.CheckIntervalSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_CHECK_INTERVAL_SEC=%d", c.Watchdog.CheckIntervalSec))
-	}
-	if c.Watchdog.GraceSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_GRACE_SEC=%d", c.Watchdog.GraceSec))
-	}
-	if c.Memlog.IntervalSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_MEMLOG_INTERVAL_SEC=%d", c.Memlog.IntervalSec))
-	}
-	return env
+	return out
 }
 
-func tagsEnv(cfg *config.Config) []string {
-	env := []string{}
-	t := cfg.Tags
-	if t.Cache.LimitBytes > 0 {
-		env = append(env, fmt.Sprintf("MLX_CACHE_LIMIT_BYTES=%d", t.Cache.LimitBytes))
+func launcherArgs(spec config.BackendSpec) []string {
+	args := []string{
+		"-m", "mlx_stack.launcher_shim",
+		"--engine", spec.Engine,
+		"--host", spec.Host,
+		"--port", fmt.Sprintf("%d", spec.Port),
 	}
-	if t.Cache.ClearIntervalSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_INTERVAL_SEC=%d", t.Cache.ClearIntervalSec))
+	if spec.Engine != "audio" {
+		args = append(args, "--model", spec.Model)
 	}
-	if t.Cache.ClearThresholdBytes > 0 {
-		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_THRESHOLD_BYTES=%d", t.Cache.ClearThresholdBytes))
+	if spec.DraftModel != "" {
+		args = append(args, "--draft-model", spec.DraftModel)
 	}
-	if t.Watchdog.KVHeadroomBytes > 0 {
-		env = append(env, fmt.Sprintf("MLX_KV_HEADROOM_BYTES=%d", t.Watchdog.KVHeadroomBytes))
-	}
-	if t.Watchdog.CheckIntervalSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_CHECK_INTERVAL_SEC=%d", t.Watchdog.CheckIntervalSec))
-	}
-	if t.Watchdog.GraceSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_GRACE_SEC=%d", t.Watchdog.GraceSec))
-	}
-	if t.Memlog.IntervalSec > 0 {
-		env = append(env, fmt.Sprintf("MLX_MEMLOG_INTERVAL_SEC=%d", t.Memlog.IntervalSec))
-	}
-	return env
+	return args
 }
 
-func buildAudioManaged(name string, ai config.AudioInstance, pythonBin string, logger *slog.Logger, broker *logobs.Broker) *supervisor.Managed {
-	if ai.Alias == "" {
-		return nil
+func backendEnv(spec config.BackendSpec, d config.Defaults) []string {
+	cache := spec.EffectiveCache(d)
+	wd := spec.EffectiveWatchdog(d)
+	ml := spec.EffectiveMemlog(d)
+	env := []string{}
+	if cache.LimitBytes > 0 {
+		env = append(env, fmt.Sprintf("MLX_CACHE_LIMIT_BYTES=%d", cache.LimitBytes))
 	}
-	return supervisor.NewManaged(supervisor.ManagedOpts{
-		Name:          name,
-		Host:          ai.Host,
-		Port:          ai.Port,
-		Alias:         ai.Alias,
-		UpstreamModel: "", // mlx_audio.server multiplexes via the per-request "model" field
-		Args: []string{
-			"-m", "mlx_stack.launcher_shim",
-			"--engine", "audio",
-			"--host", ai.Host,
-			"--port", fmt.Sprintf("%d", ai.Port),
-		},
-		WorkerFactory: func(args []string) *supervisor.Worker {
-			return supervisor.New(supervisor.WorkerSpec{
-				Name: name, Command: pythonBin, Args: args, Logger: logger, Broker: broker,
-			})
-		},
-	})
+	if cache.ClearIntervalSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_INTERVAL_SEC=%d", cache.ClearIntervalSec))
+	}
+	if cache.ClearThresholdBytes > 0 {
+		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_THRESHOLD_BYTES=%d", cache.ClearThresholdBytes))
+	}
+	if wd.KVHeadroomBytes > 0 {
+		env = append(env, fmt.Sprintf("MLX_KV_HEADROOM_BYTES=%d", wd.KVHeadroomBytes))
+	}
+	if wd.CheckIntervalSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_CHECK_INTERVAL_SEC=%d", wd.CheckIntervalSec))
+	}
+	if wd.GraceSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_GRACE_SEC=%d", wd.GraceSec))
+	}
+	if ml.IntervalSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_MEMLOG_INTERVAL_SEC=%d", ml.IntervalSec))
+	}
+	return env
 }
 
 func setupLogger(level string, jsonOut bool, logDir string) (*slog.Logger, *logrot.Rotator) {
 	lvl := slog.LevelInfo
-	switch level {
+	switch strings.ToLower(level) {
 	case "debug":
 		lvl = slog.LevelDebug
 	case "warn":

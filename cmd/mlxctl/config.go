@@ -32,7 +32,7 @@ func cmdConfig(args []string) {
 }
 
 // legacyVars is the ordered list of scalar variables to extract from the
-// legacy zsh config. We emit them explicitly because zsh does not export them.
+// legacy zsh config.
 var legacyVars = []string{
 	"MLX_VENV",
 	"MLX_LOG_DIR",
@@ -64,6 +64,14 @@ var legacyVars = []string{
 	"KOKORO_PORT",
 }
 
+// legacyProfile holds the parsed fields of one CHAT_MODEL_PROFILES entry.
+type legacyProfile struct {
+	Name   string
+	Model  string
+	Draft  string
+	Engine string
+}
+
 func cmdConfigMigrate(args []string) {
 	src := os.ExpandEnv("$HOME/.config/mlx.conf")
 	if len(args) > 0 {
@@ -74,10 +82,7 @@ func cmdConfigMigrate(args []string) {
 		os.Exit(1)
 	}
 
-	// Build a zsh snippet that:
-	//   1. sources the legacy config
-	//   2. prints MLX_STACK_VARS_BEGIN … END with explicit var=value lines
-	//   3. prints MLX_STACK_PROFILES_BEGIN … END with name|model|draft|engine lines
+	// Build a zsh snippet that sources the legacy config and prints vars/profiles.
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "source %q\n", src)
 	sb.WriteString("echo 'MLX_STACK_VARS_BEGIN'\n")
@@ -99,7 +104,7 @@ func cmdConfigMigrate(args []string) {
 	}
 
 	env := map[string]string{}
-	profiles := map[string]config.Profile{}
+	var profiles []legacyProfile
 	state := "scan"
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
@@ -127,11 +132,12 @@ func cmdConfigMigrate(args []string) {
 		case "profiles":
 			parts := strings.SplitN(line, "|", 4)
 			if len(parts) == 4 {
-				profiles[parts[0]] = config.Profile{
+				profiles = append(profiles, legacyProfile{
+					Name:   parts[0],
 					Model:  parts[1],
 					Draft:  parts[2],
 					Engine: parts[3],
-				}
+				})
 			}
 		}
 	}
@@ -158,7 +164,7 @@ func parsePortList(s string) []int {
 	if s == "" {
 		return nil
 	}
-	// legacy conf uses comma-separated OR space-separated
+	// Legacy conf uses comma-separated OR space-separated.
 	s = strings.ReplaceAll(s, ",", " ")
 	parts := strings.Fields(s)
 	out := make([]int, 0, len(parts))
@@ -173,67 +179,107 @@ func parsePortList(s string) []int {
 	return out
 }
 
-func buildConfig(env map[string]string, profiles map[string]config.Profile) *config.Config {
+// buildConfig converts the legacy env vars and profile list into the new
+// [[backend]] array-of-tables Config shape.
+func buildConfig(env map[string]string, profiles []legacyProfile) *config.Config {
+	host := firstNonEmpty(env["ROUTER_HOST"], env["MLX_HOST"], "127.0.0.1")
+	chatPort := atoi(firstNonEmpty(env["CHAT_PORT"], "1234"))
+
 	c := &config.Config{
 		LogDir:     env["MLX_LOG_DIR"],
 		ModelsRoot: env["MODELS_ROOT"],
 		PythonBin:  env["MLX_VENV"] + "/bin/python",
 		Router: config.Router{
-			Host:       firstNonEmpty(env["ROUTER_HOST"], env["MLX_HOST"], "127.0.0.1"),
+			Host:       host,
 			Port:       atoi(firstNonEmpty(env["ROUTER_PORT"], "8080")),
 			ExtraPorts: parsePortList(env["ROUTER_EXTRA_PORTS"]),
 		},
-		Chat: config.Chat{
-			DefaultProfile: env["CHAT_PROFILE_DEFAULT"],
-			Host:           firstNonEmpty(env["MLX_HOST"], "127.0.0.1"),
-			Port:           atoi(firstNonEmpty(env["CHAT_PORT"], "1234")),
-			SwapTimeoutSec: 90,
-			Cache: config.Cache{
-				LimitBytes:          atoi64(env["CHAT_CACHE_LIMIT_BYTES"]),
-				ClearIntervalSec:    atoi(env["CHAT_CACHE_CLEAR_INTERVAL_SEC"]),
-				ClearThresholdBytes: atoi64(env["CHAT_CACHE_CLEAR_THRESHOLD_BYTES"]),
-			},
-			Memlog:   config.Memlog{IntervalSec: atoi(env["CHAT_MEMORY_LOG_INTERVAL_SEC"])},
-			Profiles: profiles,
-		},
 	}
 
+	defaultProfile := env["CHAT_PROFILE_DEFAULT"]
+
+	// Emit one swap-mode backend per legacy chat profile.
+	for _, p := range profiles {
+		spec := config.BackendSpec{
+			Name:    p.Name,
+			Engine:  p.Engine,
+			Mode:    "swap",
+			Group:   "chat",
+			Host:    host,
+			Port:    chatPort,
+			Model:   p.Model,
+			Default: p.Name == defaultProfile,
+		}
+		if p.Draft != "" {
+			spec.DraftModel = p.Draft
+		}
+		// Attach cache/memlog from legacy CHAT_* vars if set.
+		cl := atoi64(env["CHAT_CACHE_LIMIT_BYTES"])
+		ci := atoi(env["CHAT_CACHE_CLEAR_INTERVAL_SEC"])
+		ct := atoi64(env["CHAT_CACHE_CLEAR_THRESHOLD_BYTES"])
+		mi := atoi(env["CHAT_MEMORY_LOG_INTERVAL_SEC"])
+		if cl != 0 || ci != 0 || ct != 0 {
+			spec.Cache = &config.Cache{
+				LimitBytes:          cl,
+				ClearIntervalSec:    ci,
+				ClearThresholdBytes: ct,
+			}
+		}
+		if mi != 0 {
+			spec.Memlog = &config.Memlog{IntervalSec: mi}
+		}
+		c.Backends = append(c.Backends, spec)
+	}
+
+	// Tags backend.
 	if env["TAGS_MODEL"] != "" {
 		tagsAlias := firstNonEmpty(env["ROUTER_TAGS_ALIAS"], filepath.Base(env["TAGS_MODEL"]))
-		c.Tags = config.Tags{
-			Host:   firstNonEmpty(env["MLX_HOST"], "127.0.0.1"),
+		spec := config.BackendSpec{
+			Name:   tagsAlias,
+			Engine: firstNonEmpty(env["TAGS_ENGINE"], "vlm"),
+			Mode:   "persistent",
+			Host:   host,
 			Port:   atoi(env["TAGS_PORT"]),
 			Model:  env["TAGS_MODEL"],
-			Engine: firstNonEmpty(env["TAGS_ENGINE"], "vlm"),
-			Alias:  tagsAlias,
-			Cache: config.Cache{
-				LimitBytes:          atoi64(env["TAGS_CACHE_LIMIT_BYTES"]),
-				ClearIntervalSec:    atoi(env["TAGS_CACHE_CLEAR_INTERVAL_SEC"]),
-				ClearThresholdBytes: atoi64(env["TAGS_CACHE_CLEAR_THRESHOLD_BYTES"]),
-			},
-			Memlog: config.Memlog{IntervalSec: atoi(env["TAGS_MEMORY_LOG_INTERVAL_SEC"])},
 		}
+		cl := atoi64(env["TAGS_CACHE_LIMIT_BYTES"])
+		ci := atoi(env["TAGS_CACHE_CLEAR_INTERVAL_SEC"])
+		ct := atoi64(env["TAGS_CACHE_CLEAR_THRESHOLD_BYTES"])
+		mi := atoi(env["TAGS_MEMORY_LOG_INTERVAL_SEC"])
+		if cl != 0 || ci != 0 || ct != 0 {
+			spec.Cache = &config.Cache{
+				LimitBytes:          cl,
+				ClearIntervalSec:    ci,
+				ClearThresholdBytes: ct,
+			}
+		}
+		if mi != 0 {
+			spec.Memlog = &config.Memlog{IntervalSec: mi}
+		}
+		c.Backends = append(c.Backends, spec)
 	}
 
+	// TTS backend.
 	if env["TTS_MODEL"] != "" {
 		ttsAlias := firstNonEmpty(env["ROUTER_TTS_ALIAS"], filepath.Base(env["TTS_MODEL"]))
-		c.TTS = config.AudioInstance{
-			Host:   firstNonEmpty(env["MLX_HOST"], "127.0.0.1"),
-			Port:   atoi(firstNonEmpty(env["TTS_PORT"], "1237")),
+		c.Backends = append(c.Backends, config.BackendSpec{
+			Name:   ttsAlias,
 			Engine: "audio",
-			Models: []string{env["TTS_MODEL"]},
-			Alias:  ttsAlias,
-		}
+			Mode:   "persistent",
+			Host:   host,
+			Port:   atoi(firstNonEmpty(env["TTS_PORT"], "1237")),
+		})
 	}
 
+	// Kokoro backend.
 	if env["KOKORO_MODEL"] != "" {
-		c.Kokoro = config.AudioInstance{
-			Host:   firstNonEmpty(env["MLX_HOST"], "127.0.0.1"),
-			Port:   atoi(firstNonEmpty(env["KOKORO_PORT"], "8880")),
+		c.Backends = append(c.Backends, config.BackendSpec{
+			Name:   "kokoro",
 			Engine: "audio",
-			Models: []string{env["KOKORO_MODEL"]},
-			Alias:  "kokoro",
-		}
+			Mode:   "persistent",
+			Host:   host,
+			Port:   atoi(firstNonEmpty(env["KOKORO_PORT"], "8880")),
+		})
 	}
 
 	return c

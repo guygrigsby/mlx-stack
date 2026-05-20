@@ -5,73 +5,76 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 
-	"github.com/guygrigsby/mlx-stack/internal/backend"
+	bk "github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
 	"github.com/guygrigsby/mlx-stack/internal/obsstate"
 )
 
-type ChatController interface {
-	State() *backend.ChatState
-	EnsureProfile(ctx context.Context, name string) error
-	Stop(ctx context.Context) error
-}
-
-type TagsController interface {
-	Alias() string
-	PID() int
-	BaseURL() string
-	Running() bool
-}
-
 type Handlers struct {
 	Config   *config.Config
-	Chat     ChatController
-	Tags     TagsController
+	Backends []bk.Backend
+	// Aliases maps member-name -> primary backend name (used for swap groups).
+	Aliases  map[string]string
 	Broker   *logobs.Broker
 	ObsStore *obsstate.Store
 }
 
-type ChatStatus struct {
-	CurrentProfile string   `json:"current_profile"`
-	PID            int      `json:"pid"`
-	URL            string   `json:"url"`
-	Profiles       []string `json:"profiles"`
-}
-
-type TagsStatus struct {
-	Alias   string `json:"alias"`
-	PID     int    `json:"pid"`
-	URL     string `json:"url"`
-	Running bool   `json:"running"`
+type BackendStatus struct {
+	Name        string `json:"name"`
+	Group       string `json:"group"`
+	Mode        string `json:"mode"`
+	Engine      string `json:"engine"`
+	URL         string `json:"url"`
+	Running     bool   `json:"running"`
+	PID         int    `json:"pid"`
+	CurrentName string `json:"current_name,omitempty"`
 }
 
 type StatusResponse struct {
-	Chat    ChatStatus                   `json:"chat"`
-	Tags    *TagsStatus                  `json:"tags,omitempty"`
-	Workers map[string]obsstate.WorkerObs `json:"workers,omitempty"`
+	Backends []BackendStatus               `json:"backends"`
+	Workers  map[string]obsstate.WorkerObs `json:"workers,omitempty"`
 }
 
-type swapReq struct {
-	Profile string `json:"profile"`
+type nameReq struct {
+	Name string `json:"name"`
 }
 
-type backendReq struct {
-	Backend string `json:"backend"`
+// currentNameAccessor lets us pull Current() from a Group without importing
+// the supervisor package (which would create a cycle).
+type currentNameAccessor interface {
+	Current() string
 }
 
 func (h *Handlers) Mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", h.health)
 	mux.HandleFunc("GET /v1/status", h.status)
-	mux.HandleFunc("POST /v1/swap", h.swap)
 	mux.HandleFunc("POST /v1/start", h.start)
 	mux.HandleFunc("POST /v1/stop", h.stop)
 	mux.HandleFunc("POST /v1/restart", h.restart)
+	mux.HandleFunc("POST /v1/swap", h.start) // alias
 	mux.HandleFunc("GET /v1/logs/tail", h.tail)
 	return mux
+}
+
+func (h *Handlers) byName(name string) (bk.Backend, error) {
+	// First try direct match.
+	for _, b := range h.Backends {
+		if b.Name() == name {
+			return b, nil
+		}
+	}
+	// Then try aliases (swap group members).
+	if primary, ok := h.Aliases[name]; ok {
+		for _, b := range h.Backends {
+			if b.Name() == primary {
+				return b, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("unknown backend %q", name)
 }
 
 func (h *Handlers) health(w http.ResponseWriter, r *http.Request) {
@@ -80,28 +83,23 @@ func (h *Handlers) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
-	st := h.Chat.State()
-	profiles := make([]string, 0, len(h.Config.Chat.Profiles))
-	for name := range h.Config.Chat.Profiles {
-		profiles = append(profiles, name)
-	}
-	sort.Strings(profiles)
-	resp := StatusResponse{
-		Chat: ChatStatus{
-			CurrentProfile: st.CurrentProfile,
-			PID:            st.WorkerPID,
-			URL:            st.WorkerURL,
-			Profiles:       profiles,
-		},
-	}
-	if h.Tags != nil {
-		resp.Tags = &TagsStatus{
-			Alias:   h.Tags.Alias(),
-			PID:     h.Tags.PID(),
-			URL:     h.Tags.BaseURL(),
-			Running: h.Tags.Running(),
+	statuses := make([]BackendStatus, 0, len(h.Backends))
+	for _, b := range h.Backends {
+		s := BackendStatus{
+			Name:    b.Name(),
+			Group:   b.Group(),
+			Mode:    b.Mode(),
+			Engine:  b.Engine(),
+			URL:     b.BaseURL(),
+			Running: b.Running(),
+			PID:     b.PID(),
 		}
+		if cn, ok := b.(currentNameAccessor); ok {
+			s.CurrentName = cn.Current()
+		}
+		statuses = append(statuses, s)
 	}
+	resp := StatusResponse{Backends: statuses}
 	if h.ObsStore != nil {
 		resp.Workers = h.ObsStore.Snapshot()
 	}
@@ -109,34 +107,18 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (h *Handlers) swap(w http.ResponseWriter, r *http.Request) {
-	var req swapReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	if _, ok := h.Config.Chat.Profiles[req.Profile]; !ok {
-		http.Error(w, fmt.Sprintf("unknown profile %q", req.Profile), 400)
-		return
-	}
-	if err := h.Chat.EnsureProfile(r.Context(), req.Profile); err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	w.Write([]byte(`{"ok":true}`))
-}
-
 func (h *Handlers) start(w http.ResponseWriter, r *http.Request) {
-	var req backendReq
+	var req nameReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if req.Backend != "chat" {
-		http.Error(w, "only 'chat' supported in phase 1", 400)
+	b, err := h.byName(req.Name)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
-	if err := h.Chat.EnsureProfile(r.Context(), h.Config.Chat.DefaultProfile); err != nil {
+	if err := b.EnsureLoaded(r.Context(), req.Name); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -144,16 +126,17 @@ func (h *Handlers) start(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) stop(w http.ResponseWriter, r *http.Request) {
-	var req backendReq
+	var req nameReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if req.Backend != "chat" {
-		http.Error(w, "only 'chat' supported in phase 1", 400)
+	b, err := h.byName(req.Name)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
-	if err := h.Chat.Stop(r.Context()); err != nil {
+	if err := b.Stop(r.Context()); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -161,20 +144,21 @@ func (h *Handlers) stop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) restart(w http.ResponseWriter, r *http.Request) {
-	var req backendReq
+	var req nameReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if req.Backend != "chat" {
-		http.Error(w, "only 'chat' supported in phase 1", 400)
+	b, err := h.byName(req.Name)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
-	if err := h.Chat.Stop(r.Context()); err != nil {
+	if err := b.Stop(r.Context()); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if err := h.Chat.EnsureProfile(r.Context(), h.Config.Chat.DefaultProfile); err != nil {
+	if err := b.EnsureLoaded(r.Context(), req.Name); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -193,8 +177,12 @@ func (h *Handlers) tail(w http.ResponseWriter, r *http.Request) {
 	if flusher != nil {
 		flusher.Flush()
 	}
+	filter := r.URL.Query().Get("worker") // optional ?worker=name filter
 	events := h.Broker.Subscribe(r.Context())
 	for ev := range events {
+		if filter != "" && ev.Worker != filter {
+			continue
+		}
 		_, err := fmt.Fprintf(w, "data: %s\n\n", ev.Raw)
 		if err != nil {
 			return
@@ -204,3 +192,6 @@ func (h *Handlers) tail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// to keep the context import live (it's used by request handlers via r.Context()).
+var _ = context.Background

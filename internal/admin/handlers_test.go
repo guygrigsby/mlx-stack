@@ -10,59 +10,69 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guygrigsby/mlx-stack/internal/backend"
+	bk "github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
 	"github.com/guygrigsby/mlx-stack/internal/obsstate"
 )
 
-type fakeChat struct {
-	state     *backend.ChatState
-	ensureErr error
+type fakeBackend struct {
+	name, group, mode, engine, url, upstream string
+	current                                  string
+	running                                  bool
+	pid                                      int
+
+	ensureCalls []string
+	stopCalls   int
+	ensureErr   error
+	stopErr     error
 }
 
-func (f *fakeChat) State() *backend.ChatState                         { return f.state }
-func (f *fakeChat) EnsureProfile(ctx context.Context, n string) error { return f.ensureErr }
-func (f *fakeChat) Stop(ctx context.Context) error                    { return nil }
-
-type fakeTags struct {
-	alias, url string
-	pid        int
-	running    bool
+func (f *fakeBackend) Name() string    { return f.name }
+func (f *fakeBackend) Group() string   { return f.group }
+func (f *fakeBackend) Mode() string    { return f.mode }
+func (f *fakeBackend) Engine() string  { return f.engine }
+func (f *fakeBackend) BaseURL() string { return f.url }
+func (f *fakeBackend) UpstreamModel() string { return f.upstream }
+func (f *fakeBackend) Running() bool   { return f.running }
+func (f *fakeBackend) PID() int        { return f.pid }
+func (f *fakeBackend) Current() string { return f.current }
+func (f *fakeBackend) EnsureLoaded(_ context.Context, n string) error {
+	f.ensureCalls = append(f.ensureCalls, n)
+	return f.ensureErr
+}
+func (f *fakeBackend) Start(_ context.Context) error { return f.EnsureLoaded(context.Background(), f.name) }
+func (f *fakeBackend) Stop(_ context.Context) error {
+	f.stopCalls++
+	return f.stopErr
 }
 
-func (f *fakeTags) Alias() string    { return f.alias }
-func (f *fakeTags) PID() int         { return f.pid }
-func (f *fakeTags) BaseURL() string  { return f.url }
-func (f *fakeTags) Running() bool    { return f.running }
-
-func newTestHandlers() *Handlers {
-	return &Handlers{
-		Config: &config.Config{
-			Chat: config.Chat{
-				DefaultProfile: "p1",
-				Profiles:       map[string]config.Profile{"p1": {Model: "/m", Engine: "lm"}, "p2": {Model: "/m", Engine: "lm"}},
-			},
-		},
-		Chat: &fakeChat{state: &backend.ChatState{CurrentProfile: "p1", WorkerPID: 12345}},
+func newTestHandlers() (*Handlers, *fakeBackend, *fakeBackend) {
+	chat := &fakeBackend{name: "chat", group: "chat", mode: "swap", engine: "lm", url: "http://x:1234", running: true, pid: 100, current: "valkyrie"}
+	embed := &fakeBackend{name: "embed", group: "embed", mode: "persistent", engine: "embed", url: "http://x:1236", running: true, pid: 200}
+	h := &Handlers{
+		Config:   &config.Config{},
+		Backends: []bk.Backend{chat, embed},
+		Aliases:  map[string]string{"valkyrie": "chat", "scout": "chat"},
 	}
+	return h, chat, embed
 }
 
 func TestHandler_Health(t *testing.T) {
-	h := newTestHandlers().Mux()
+	h, _, _ := newTestHandlers()
 	req := httptest.NewRequest("GET", "/v1/health", nil)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	h.Mux().ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Errorf("status: %d", rr.Code)
 	}
 }
 
 func TestHandler_Status(t *testing.T) {
-	h := newTestHandlers().Mux()
+	h, _, _ := newTestHandlers()
 	req := httptest.NewRequest("GET", "/v1/status", nil)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	h.Mux().ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatalf("status: %d", rr.Code)
 	}
@@ -70,99 +80,99 @@ func TestHandler_Status(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Chat.CurrentProfile != "p1" || resp.Chat.PID != 12345 {
-		t.Errorf("chat status: %+v", resp.Chat)
+	if len(resp.Backends) != 2 {
+		t.Fatalf("want 2 backends, got %d", len(resp.Backends))
 	}
-	if len(resp.Chat.Profiles) != 2 {
-		t.Errorf("profile count: %d", len(resp.Chat.Profiles))
+	chat := resp.Backends[0]
+	if chat.Name != "chat" || chat.Mode != "swap" || chat.CurrentName != "valkyrie" {
+		t.Errorf("chat: %+v", chat)
 	}
 }
 
-func TestHandler_Swap(t *testing.T) {
-	h := newTestHandlers().Mux()
-	req := httptest.NewRequest("POST", "/v1/swap", strings.NewReader(`{"profile":"p2"}`))
-	req.Header.Set("Content-Type", "application/json")
+func TestHandler_StartByPrimaryName(t *testing.T) {
+	h, chat, _ := newTestHandlers()
+	req := httptest.NewRequest("POST", "/v1/start", strings.NewReader(`{"name":"chat"}`))
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	h.Mux().ServeHTTP(rr, req)
 	if rr.Code != 200 {
-		t.Errorf("status: %d body: %s", rr.Code, rr.Body.String())
+		t.Fatalf("status: %d body: %s", rr.Code, rr.Body.String())
+	}
+	if len(chat.ensureCalls) != 1 || chat.ensureCalls[0] != "chat" {
+		t.Errorf("ensureCalls: %v", chat.ensureCalls)
 	}
 }
 
-func TestHandler_SwapUnknownProfile(t *testing.T) {
-	h := newTestHandlers().Mux()
-	req := httptest.NewRequest("POST", "/v1/swap", strings.NewReader(`{"profile":"ghost"}`))
-	req.Header.Set("Content-Type", "application/json")
+func TestHandler_StartByAlias(t *testing.T) {
+	h, chat, _ := newTestHandlers()
+	req := httptest.NewRequest("POST", "/v1/start", strings.NewReader(`{"name":"valkyrie"}`))
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	h.Mux().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d body: %s", rr.Code, rr.Body.String())
+	}
+	if len(chat.ensureCalls) != 1 || chat.ensureCalls[0] != "valkyrie" {
+		t.Errorf("ensureCalls: %v", chat.ensureCalls)
+	}
+}
+
+func TestHandler_StartUnknownReturns400(t *testing.T) {
+	h, _, _ := newTestHandlers()
+	req := httptest.NewRequest("POST", "/v1/start", strings.NewReader(`{"name":"ghost"}`))
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
 	if rr.Code != 400 {
 		t.Errorf("status: %d", rr.Code)
 	}
 }
 
+func TestHandler_Swap(t *testing.T) {
+	h, chat, _ := newTestHandlers()
+	req := httptest.NewRequest("POST", "/v1/swap", strings.NewReader(`{"name":"scout"}`))
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d", rr.Code)
+	}
+	if len(chat.ensureCalls) != 1 || chat.ensureCalls[0] != "scout" {
+		t.Errorf("ensureCalls: %v", chat.ensureCalls)
+	}
+}
+
 func TestHandler_Stop(t *testing.T) {
-	h := newTestHandlers().Mux()
-	req := httptest.NewRequest("POST", "/v1/stop", strings.NewReader(`{"backend":"chat"}`))
-	req.Header.Set("Content-Type", "application/json")
+	h, chat, _ := newTestHandlers()
+	req := httptest.NewRequest("POST", "/v1/stop", strings.NewReader(`{"name":"chat"}`))
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != 200 {
-		t.Errorf("status: %d", rr.Code)
-	}
-}
-
-func TestHandler_StatusWithTags(t *testing.T) {
-	h := newTestHandlers()
-	h.Tags = &fakeTags{alias: "qwen-tags", url: "http://127.0.0.1:1235", pid: 12999, running: true}
-	mux := h.Mux()
-	req := httptest.NewRequest("GET", "/v1/status", nil)
-	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, req)
+	h.Mux().ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatalf("status: %d", rr.Code)
 	}
-	var resp StatusResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if resp.Tags == nil {
-		t.Fatal("Tags missing")
-	}
-	if resp.Tags.Alias != "qwen-tags" || resp.Tags.PID != 12999 || resp.Tags.Running != true {
-		t.Errorf("tags status: %+v", *resp.Tags)
+	if chat.stopCalls != 1 {
+		t.Errorf("stopCalls: %d", chat.stopCalls)
 	}
 }
 
-func TestHandler_StatusIncludesWorkers(t *testing.T) {
-	h := newTestHandlers()
-	store := obsstate.New()
-	store.Apply(logobs.Event{Worker: "chat", Kind: logobs.KindMem, Mem: logobs.MemSnapshot{Active: 1234}})
-	h.ObsStore = store
-
-	mux := h.Mux()
-	req := httptest.NewRequest("GET", "/v1/status", nil)
+func TestHandler_Restart(t *testing.T) {
+	h, _, embed := newTestHandlers()
+	req := httptest.NewRequest("POST", "/v1/restart", strings.NewReader(`{"name":"embed"}`))
 	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, req)
+	h.Mux().ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatalf("status: %d", rr.Code)
 	}
-	var resp StatusResponse
-	json.Unmarshal(rr.Body.Bytes(), &resp)
-	if resp.Workers == nil {
-		t.Fatal("workers field missing")
+	if embed.stopCalls != 1 {
+		t.Errorf("stopCalls: %d", embed.stopCalls)
 	}
-	if w, ok := resp.Workers["chat"]; !ok || w.LatestMem == nil || w.LatestMem.Active != 1234 {
-		t.Errorf("worker mem: %+v", w)
+	if len(embed.ensureCalls) != 1 {
+		t.Errorf("ensureCalls: %v", embed.ensureCalls)
 	}
 }
 
 func TestHandler_LogsTail(t *testing.T) {
 	broker := logobs.NewBroker()
-	h := newTestHandlers()
+	h, _, _ := newTestHandlers()
 	h.Broker = broker
-	mux := h.Mux()
 
-	ts := httptest.NewServer(mux)
+	ts := httptest.NewServer(h.Mux())
 	defer ts.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -175,20 +185,37 @@ func TestHandler_LogsTail(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Give the subscription a moment to register.
 	time.Sleep(50 * time.Millisecond)
 	broker.Publish(logobs.Event{Raw: "[mlx-launch] test-line"})
 
 	scanner := bufio.NewScanner(resp.Body)
 	gotLine := false
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, "test-line") {
+		if strings.Contains(scanner.Text(), "test-line") {
 			gotLine = true
 			break
 		}
 	}
 	if !gotLine {
-		t.Errorf("did not receive published event via SSE")
+		t.Errorf("did not receive published event")
+	}
+}
+
+func TestHandler_StatusIncludesWorkers(t *testing.T) {
+	store := obsstate.New()
+	store.Apply(logobs.Event{Worker: "chat", Kind: logobs.KindMem, Mem: logobs.MemSnapshot{Active: 1234}})
+	h, _, _ := newTestHandlers()
+	h.ObsStore = store
+
+	req := httptest.NewRequest("GET", "/v1/status", nil)
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
+	var resp StatusResponse
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Workers == nil {
+		t.Fatal("workers missing")
+	}
+	if w, ok := resp.Workers["chat"]; !ok || w.LatestMem == nil || w.LatestMem.Active != 1234 {
+		t.Errorf("worker mem: %+v", w)
 	}
 }
