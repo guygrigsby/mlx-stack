@@ -102,10 +102,7 @@ func cmdStatus(args []string) {
 	if err != nil {
 		notRunning()
 	}
-	var parsed map[string]any
-	json.Unmarshal(b, &parsed)
-	pretty, _ := json.MarshalIndent(parsed, "", "  ")
-	fmt.Println(string(pretty))
+	renderStatus(os.Stdout, b)
 }
 
 func cmdSwap(args []string) {

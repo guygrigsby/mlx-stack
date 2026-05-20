@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -27,12 +26,9 @@ func cmdMonitor(args []string) {
 		if err != nil {
 			notRunning()
 		}
-		var parsed map[string]any
-		json.Unmarshal(b, &parsed)
-		pretty, _ := json.MarshalIndent(parsed, "", "  ")
 		fmt.Print("\033[2J\033[H")
 		fmt.Println("mlx-stack status (Ctrl-C to exit)")
-		fmt.Println(string(pretty))
+		renderStatus(os.Stdout, b)
 		select {
 		case <-stop:
 			fmt.Println()
