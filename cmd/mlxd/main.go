@@ -111,7 +111,7 @@ func main() {
 
 	adminSrv := &admin.Server{
 		SocketPath: *socketPath,
-		Handler:    (&admin.Handlers{Config: cfg, Chat: chatSwap}).Mux(),
+		Handler:    (&admin.Handlers{Config: cfg, Chat: chatSwap, Tags: tagsMgr}).Mux(),
 	}
 
 	if err := adminSrv.Start(); err != nil {

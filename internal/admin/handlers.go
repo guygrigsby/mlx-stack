@@ -17,9 +17,17 @@ type ChatController interface {
 	Stop(ctx context.Context) error
 }
 
+type TagsController interface {
+	Alias() string
+	PID() int
+	BaseURL() string
+	Running() bool
+}
+
 type Handlers struct {
 	Config *config.Config
 	Chat   ChatController
+	Tags   TagsController
 }
 
 type ChatStatus struct {
@@ -29,8 +37,16 @@ type ChatStatus struct {
 	Profiles       []string `json:"profiles"`
 }
 
+type TagsStatus struct {
+	Alias   string `json:"alias"`
+	PID     int    `json:"pid"`
+	URL     string `json:"url"`
+	Running bool   `json:"running"`
+}
+
 type StatusResponse struct {
-	Chat ChatStatus `json:"chat"`
+	Chat ChatStatus  `json:"chat"`
+	Tags *TagsStatus `json:"tags,omitempty"`
 }
 
 type swapReq struct {
@@ -71,6 +87,14 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 			URL:            st.WorkerURL,
 			Profiles:       profiles,
 		},
+	}
+	if h.Tags != nil {
+		resp.Tags = &TagsStatus{
+			Alias:   h.Tags.Alias(),
+			PID:     h.Tags.PID(),
+			URL:     h.Tags.BaseURL(),
+			Running: h.Tags.Running(),
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
