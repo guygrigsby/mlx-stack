@@ -80,6 +80,73 @@ func TestValidate_PortRange(t *testing.T) {
 	}
 }
 
+func TestValidate_TagsOK(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Tags: Tags{
+			Host:   "127.0.0.1",
+			Port:   1235,
+			Model:  "/m/qwen-tags",
+			Engine: "vlm",
+			Alias:  "qwen-tags",
+		},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_TagsZeroValueOK(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("tags zero-value must validate: %v", err)
+	}
+}
+
+func TestValidate_TagsBadEngine(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Tags: Tags{
+			Host:   "127.0.0.1",
+			Port:   1235,
+			Model:  "/m",
+			Engine: "audio",
+			Alias:  "x",
+		},
+	}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "tags.engine") {
+		t.Fatalf("want tags.engine error: %v", err)
+	}
+}
+
+func TestValidate_TagsMissingAlias(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Tags: Tags{
+			Host:   "127.0.0.1",
+			Port:   1235,
+			Model:  "/m",
+			Engine: "lm",
+			Alias:  "",
+		},
+	}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "tags.alias") {
+		t.Fatalf("want tags.alias error: %v", err)
+	}
+}
+
 func minChat() Chat {
 	return Chat{
 		DefaultProfile: "p1",

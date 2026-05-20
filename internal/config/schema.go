@@ -8,6 +8,7 @@ type Config struct {
 	PythonBin  string `toml:"python_bin"`
 	Router     Router `toml:"router"`
 	Chat       Chat   `toml:"chat"`
+	Tags       Tags   `toml:"tags"`
 }
 
 type Router struct {
@@ -50,6 +51,17 @@ type Memlog struct {
 	IntervalSec int `toml:"interval_sec"`
 }
 
+type Tags struct {
+	Host     string   `toml:"host"`
+	Port     int      `toml:"port"`
+	Model    string   `toml:"model"`
+	Engine   string   `toml:"engine"`
+	Alias    string   `toml:"alias"`
+	Cache    Cache    `toml:"cache"`
+	Watchdog Watchdog `toml:"watchdog"`
+	Memlog   Memlog   `toml:"memlog"`
+}
+
 func (c *Config) Validate() error {
 	if c.PythonBin == "" {
 		return fmt.Errorf("python_bin: required")
@@ -77,6 +89,20 @@ func (c *Config) Validate() error {
 		}
 		if prof.Engine != "lm" && prof.Engine != "vlm" {
 			return fmt.Errorf("chat.profiles.%s.engine: must be 'lm' or 'vlm', got %q", name, prof.Engine)
+		}
+	}
+	if c.Tags.Model != "" || c.Tags.Port != 0 || c.Tags.Alias != "" {
+		if c.Tags.Port <= 0 || c.Tags.Port > 65535 {
+			return fmt.Errorf("tags.port: must be 1..65535, got %d", c.Tags.Port)
+		}
+		if c.Tags.Model == "" {
+			return fmt.Errorf("tags.model: required when tags configured")
+		}
+		if c.Tags.Engine != "lm" && c.Tags.Engine != "vlm" {
+			return fmt.Errorf("tags.engine: must be 'lm' or 'vlm', got %q", c.Tags.Engine)
+		}
+		if c.Tags.Alias == "" {
+			return fmt.Errorf("tags.alias: required when tags configured")
 		}
 	}
 	return nil

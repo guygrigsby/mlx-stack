@@ -26,6 +26,7 @@ func Load(path string) (*Config, error) {
 	c.LogDir = expandHome(c.LogDir)
 	c.ModelsRoot = expandHome(c.ModelsRoot)
 	c.PythonBin = expandHome(c.PythonBin)
+	c.Tags.Model = expandHome(c.Tags.Model)
 	for name, prof := range c.Chat.Profiles {
 		prof.Model = expandHome(prof.Model)
 		prof.Draft = expandHome(prof.Draft)
