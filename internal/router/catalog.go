@@ -33,6 +33,9 @@ func (c *Catalog) List() []Model {
 	for name := range c.cfg.Chat.Profiles {
 		out = append(out, Model{ID: name})
 	}
+	if c.cfg.Tags.Alias != "" {
+		out = append(out, Model{ID: c.cfg.Tags.Alias})
+	}
 	return out
 }
 

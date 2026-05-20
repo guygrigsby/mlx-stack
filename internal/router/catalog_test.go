@@ -29,6 +29,23 @@ func TestCatalog_AggregatesChatProfiles(t *testing.T) {
 	}
 }
 
+func TestCatalog_IncludesTagsAlias(t *testing.T) {
+	cfg := &config.Config{
+		Chat: config.Chat{Profiles: map[string]config.Profile{"v": {Model: "/m", Engine: "lm"}}},
+		Tags: config.Tags{Alias: "qwen-tags"},
+	}
+	c := NewCatalog(cfg)
+	ids := []string{}
+	for _, m := range c.List() {
+		ids = append(ids, m.ID)
+	}
+	sort.Strings(ids)
+	want := []string{"qwen-tags", "v"}
+	if len(ids) != 2 || ids[0] != want[0] || ids[1] != want[1] {
+		t.Errorf("got: %v", ids)
+	}
+}
+
 func TestCatalog_JSONShape(t *testing.T) {
 	cfg := &config.Config{Chat: config.Chat{Profiles: map[string]config.Profile{"p": {Model: "/m", Engine: "lm"}}}}
 	c := NewCatalog(cfg)

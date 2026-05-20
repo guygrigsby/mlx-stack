@@ -59,9 +59,49 @@ func main() {
 		WorkerEnv: workerEnv(cfg),
 	})
 
+	var tagsMgr *supervisor.Managed
+	if cfg.Tags.Model != "" {
+		tagsMgr = supervisor.NewManaged(supervisor.ManagedOpts{
+			Name:          "tags",
+			Host:          cfg.Tags.Host,
+			Port:          cfg.Tags.Port,
+			Alias:         cfg.Tags.Alias,
+			UpstreamModel: cfg.Tags.Model,
+			Args: []string{
+				"-m", "mlx_stack.launcher_shim",
+				"--engine", cfg.Tags.Engine,
+				"--model", cfg.Tags.Model,
+				"--host", cfg.Tags.Host,
+				"--port", fmt.Sprintf("%d", cfg.Tags.Port),
+			},
+			Env: tagsEnv(cfg),
+			WorkerFactory: func(args []string) *supervisor.Worker {
+				return supervisor.New(supervisor.WorkerSpec{
+					Name:    "tags",
+					Command: cfg.PythonBin,
+					Args:    args,
+					Env:     tagsEnv(cfg),
+					Logger:  logger,
+				})
+			},
+		})
+		if err := tagsMgr.Start(context.Background()); err != nil {
+			logger.Error("tags start failed", "err", err)
+			// don't exit — chat still works
+		} else {
+			logger.Info("tags backend up", "alias", cfg.Tags.Alias, "url", tagsMgr.URL())
+		}
+	}
+
+	var managedBackends []router.ManagedBackend
+	if tagsMgr != nil {
+		managedBackends = append(managedBackends, tagsMgr)
+	}
+	registry := router.NewRegistry(cfg, chatSwap, managedBackends...)
 	routerSrv := router.NewServer(router.ServerOpts{
-		Config: cfg,
-		Chat:   chatSwap,
+		Config:   cfg,
+		Chat:     chatSwap,
+		Registry: registry,
 	})
 
 	httpSrv := &http.Server{
@@ -94,6 +134,9 @@ func main() {
 	logger.Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if tagsMgr != nil {
+		_ = tagsMgr.Stop(ctx)
+	}
 	_ = chatSwap.Stop(ctx)
 	_ = httpSrv.Shutdown(ctx)
 	_ = adminSrv.Shutdown(ctx)
@@ -123,6 +166,33 @@ func workerEnv(cfg *config.Config) []string {
 	}
 	if c.Memlog.IntervalSec > 0 {
 		env = append(env, fmt.Sprintf("MLX_MEMLOG_INTERVAL_SEC=%d", c.Memlog.IntervalSec))
+	}
+	return env
+}
+
+func tagsEnv(cfg *config.Config) []string {
+	env := []string{}
+	t := cfg.Tags
+	if t.Cache.LimitBytes > 0 {
+		env = append(env, fmt.Sprintf("MLX_CACHE_LIMIT_BYTES=%d", t.Cache.LimitBytes))
+	}
+	if t.Cache.ClearIntervalSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_INTERVAL_SEC=%d", t.Cache.ClearIntervalSec))
+	}
+	if t.Cache.ClearThresholdBytes > 0 {
+		env = append(env, fmt.Sprintf("MLX_CACHE_CLEAR_THRESHOLD_BYTES=%d", t.Cache.ClearThresholdBytes))
+	}
+	if t.Watchdog.KVHeadroomBytes > 0 {
+		env = append(env, fmt.Sprintf("MLX_KV_HEADROOM_BYTES=%d", t.Watchdog.KVHeadroomBytes))
+	}
+	if t.Watchdog.CheckIntervalSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_CHECK_INTERVAL_SEC=%d", t.Watchdog.CheckIntervalSec))
+	}
+	if t.Watchdog.GraceSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_ACTIVE_MEMORY_GRACE_SEC=%d", t.Watchdog.GraceSec))
+	}
+	if t.Memlog.IntervalSec > 0 {
+		env = append(env, fmt.Sprintf("MLX_MEMLOG_INTERVAL_SEC=%d", t.Memlog.IntervalSec))
 	}
 	return env
 }

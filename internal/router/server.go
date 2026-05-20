@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -19,21 +18,28 @@ type ChatSwapper interface {
 }
 
 type ServerOpts struct {
-	Config *config.Config
-	Chat   ChatSwapper
+	Config   *config.Config
+	Chat     ChatSwapper // required for ResolveChat path
+	Registry *Registry  // optional; built from Config + Chat if nil
 }
 
 type Server struct {
-	cfg     *config.Config
-	chat    ChatSwapper
-	catalog *Catalog
+	cfg      *config.Config
+	chat     ChatSwapper
+	registry *Registry
+	catalog  *Catalog
 }
 
 func NewServer(opts ServerOpts) *Server {
+	reg := opts.Registry
+	if reg == nil {
+		reg = NewRegistry(opts.Config, opts.Chat)
+	}
 	return &Server{
-		cfg:     opts.Config,
-		chat:    opts.Chat,
-		catalog: NewCatalog(opts.Config),
+		cfg:      opts.Config,
+		chat:     opts.Chat,
+		registry: reg,
+		catalog:  NewCatalog(opts.Config),
 	}
 }
 
@@ -68,15 +74,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if _, ok := s.cfg.Chat.Profiles[model]; !ok {
-		http.Error(w, fmt.Sprintf("unknown model %q", model), 400)
+
+	kind, mb, err := s.registry.Resolve(r.Context(), model)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
 
-	if err := s.chat.EnsureProfile(r.Context(), model); err != nil {
-		http.Error(w, "ensure profile: "+err.Error(), 502)
-		return
+	switch kind {
+	case ResolveChat:
+		if err := s.chat.EnsureProfile(r.Context(), model); err != nil {
+			http.Error(w, "ensure profile: "+err.Error(), 502)
+			return
+		}
+		_ = ProxyJSON(w, r, s.chat.BaseURL(), s.chat.UpstreamModel(model))
+	case ResolveManaged:
+		_ = ProxyJSON(w, r, mb.BaseURL(), mb.UpstreamModel())
+	default:
+		http.Error(w, "unknown model", 400)
 	}
-
-	_ = ProxyJSON(w, r, s.chat.BaseURL(), s.chat.UpstreamModel(model))
 }

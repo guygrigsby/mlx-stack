@@ -82,3 +82,33 @@ func TestServer_UnknownModelReturns400(t *testing.T) {
 		t.Errorf("status: %d body: %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestServer_ManagedAliasRoutes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"model":"/abs/qwen-tags"`) {
+			t.Errorf("body: %s", body)
+		}
+		w.Write([]byte(`{"id":"x"}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Chat: config.Chat{Profiles: map[string]config.Profile{"v": {Model: "/m", Engine: "lm"}}},
+		Tags: config.Tags{Alias: "qwen-tags", Model: "/abs/qwen-tags"},
+	}
+	tags := &fakeManaged{alias: "qwen-tags", url: upstream.URL, upstream: "/abs/qwen-tags", running: true}
+	srv := NewServer(ServerOpts{
+		Config:   cfg,
+		Chat:     &fakeSwap{},
+		Registry: NewRegistry(cfg, &fakeSwap{}, tags),
+	})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"qwen-tags"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d body: %s", rr.Code, rr.Body.String())
+	}
+}
