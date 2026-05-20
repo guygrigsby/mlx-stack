@@ -18,7 +18,7 @@ os.environ.setdefault("MLX_DISABLE_COMPILE", "1")
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="mlx_stack.launcher_shim")
-    p.add_argument("--engine", required=True, choices=["lm", "vlm"])
+    p.add_argument("--engine", required=True, choices=["lm", "vlm", "embed"])
     p.add_argument("--model", required=True)
     p.add_argument("--draft-model", default="", dest="draft_model")
     p.add_argument("--host", default="127.0.0.1")
@@ -54,6 +54,12 @@ def _env_float(name: str, default: float = 0.0) -> float:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    if args.engine == "embed":
+        from mlx_stack.embed_server.app import main as embed_main
+        print(f"[mlx-launch] starting engine=embed model={args.model} port={args.port}", file=sys.stderr, flush=True)
+        embed_main(host=args.host, port=args.port, model_path=args.model)
+        return 0
 
     if args.engine == "lm":
         from mlx_stack.patches import xtc, timing

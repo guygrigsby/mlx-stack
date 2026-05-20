@@ -71,3 +71,37 @@ def test_module_sets_mlx_disable_compile_on_import(monkeypatch):
     import mlx_stack.launcher_shim  # noqa: F401
 
     assert os.environ.get("MLX_DISABLE_COMPILE") == "1"
+
+
+def test_parse_args_accepts_embed_engine():
+    from mlx_stack import launcher_shim
+    args = launcher_shim.parse_args(["--engine", "embed", "--model", "/m", "--port", "1236"])
+    assert args.engine == "embed"
+    assert args.model == "/m"
+    assert args.port == 1236
+
+
+def test_main_embed_calls_embed_server_main(monkeypatch):
+    """When engine=embed, main() calls embed_server.main(host, port, model)."""
+    import sys
+    import types
+
+    called = {}
+
+    fake_app = types.ModuleType("mlx_stack.embed_server.app")
+    def fake_main(host, port, model_path):
+        called["host"] = host
+        called["port"] = port
+        called["model_path"] = model_path
+    fake_app.main = fake_main
+
+    fake_embed_pkg = types.ModuleType("mlx_stack.embed_server")
+    fake_embed_pkg.app = fake_app
+
+    monkeypatch.setitem(sys.modules, "mlx_stack.embed_server", fake_embed_pkg)
+    monkeypatch.setitem(sys.modules, "mlx_stack.embed_server.app", fake_app)
+
+    from mlx_stack import launcher_shim
+    launcher_shim.main(["--engine", "embed", "--model", "/m/embed", "--port", "1236", "--host", "127.0.0.1"])
+
+    assert called == {"host": "127.0.0.1", "port": 1236, "model_path": "/m/embed"}
