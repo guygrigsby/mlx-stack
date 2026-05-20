@@ -147,6 +147,67 @@ func TestValidate_TagsMissingAlias(t *testing.T) {
 	}
 }
 
+func TestValidate_EmbedManaged(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Embed:     Embed{Managed: true, Host: "127.0.0.1", Port: 1236, Model: "/m/e", Alias: "embed"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_EmbedExternal(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Embed:     Embed{Managed: false, URL: "http://other.local:1236", Alias: "embed"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_EmbedZeroValue(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("embed zero-value must validate: %v", err)
+	}
+}
+
+func TestValidate_EmbedManagedMissingModel(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Embed:     Embed{Managed: true, Port: 1236, Alias: "embed"},
+	}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "embed.model") {
+		t.Fatalf("want embed.model error: %v", err)
+	}
+}
+
+func TestValidate_EmbedExternalMissingURL(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Embed:     Embed{Managed: false, Alias: "embed"},
+	}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "embed.url") {
+		t.Fatalf("want embed.url error: %v", err)
+	}
+}
+
 func minChat() Chat {
 	return Chat{
 		DefaultProfile: "p1",

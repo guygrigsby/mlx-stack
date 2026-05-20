@@ -9,6 +9,16 @@ type Config struct {
 	Router     Router `toml:"router"`
 	Chat       Chat   `toml:"chat"`
 	Tags       Tags   `toml:"tags"`
+	Embed      Embed  `toml:"embed"`
+}
+
+type Embed struct {
+	Managed bool   `toml:"managed"`
+	Host    string `toml:"host"`
+	Port    int    `toml:"port"`
+	Model   string `toml:"model"`
+	Alias   string `toml:"alias"`
+	URL     string `toml:"url"`
 }
 
 type Router struct {
@@ -103,6 +113,23 @@ func (c *Config) Validate() error {
 		}
 		if c.Tags.Alias == "" {
 			return fmt.Errorf("tags.alias: required when tags configured")
+		}
+	}
+	if c.Embed.Alias != "" || c.Embed.Model != "" || c.Embed.URL != "" || c.Embed.Port != 0 {
+		if c.Embed.Alias == "" {
+			return fmt.Errorf("embed.alias: required when embed configured")
+		}
+		if c.Embed.Managed {
+			if c.Embed.Port <= 0 || c.Embed.Port > 65535 {
+				return fmt.Errorf("embed.port: must be 1..65535, got %d", c.Embed.Port)
+			}
+			if c.Embed.Model == "" {
+				return fmt.Errorf("embed.model: required when embed managed")
+			}
+		} else {
+			if c.Embed.URL == "" {
+				return fmt.Errorf("embed.url: required when embed external (managed=false)")
+			}
 		}
 	}
 	return nil

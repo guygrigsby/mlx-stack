@@ -10,4 +10,5 @@ var (
 	_ admin.ChatController  = (*ChatSwap)(nil)
 	_ router.ManagedBackend = (*Managed)(nil)
 	_ admin.TagsController  = (*Managed)(nil)
+	_ router.ManagedBackend = (*ExternalAdapter)(nil)
 )
