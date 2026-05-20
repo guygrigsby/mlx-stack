@@ -1,10 +1,6 @@
 package router
 
-import (
-	"time"
-
-	"github.com/guygrigsby/mlx-stack/internal/config"
-)
+import "time"
 
 type Model struct {
 	ID string `json:"id"`
@@ -23,34 +19,22 @@ type OpenAIList struct {
 }
 
 type Catalog struct {
-	cfg *config.Config
+	names []string
 }
 
-func NewCatalog(cfg *config.Config) *Catalog { return &Catalog{cfg: cfg} }
+func NewCatalog(names []string) *Catalog { return &Catalog{names: names} }
 
 func (c *Catalog) List() []Model {
-	out := []Model{}
-	for name := range c.cfg.Chat.Profiles {
-		out = append(out, Model{ID: name})
-	}
-	if c.cfg.Tags.Alias != "" {
-		out = append(out, Model{ID: c.cfg.Tags.Alias})
-	}
-	if c.cfg.Embed.Alias != "" {
-		out = append(out, Model{ID: c.cfg.Embed.Alias})
-	}
-	if c.cfg.TTS.Alias != "" {
-		out = append(out, Model{ID: c.cfg.TTS.Alias})
-	}
-	if c.cfg.Kokoro.Alias != "" {
-		out = append(out, Model{ID: c.cfg.Kokoro.Alias})
+	out := make([]Model, 0, len(c.names))
+	for _, n := range c.names {
+		out = append(out, Model{ID: n})
 	}
 	return out
 }
 
 func (c *Catalog) OpenAIResponse() OpenAIList {
-	models := c.List()
 	now := time.Now().Unix()
+	models := c.List()
 	data := make([]OpenAIModel, 0, len(models))
 	for _, m := range models {
 		data = append(data, OpenAIModel{ID: m.ID, Object: "model", Created: now, OwnedBy: "mlx-stack"})

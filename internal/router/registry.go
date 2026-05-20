@@ -4,67 +4,62 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/guygrigsby/mlx-stack/internal/config"
+	"github.com/guygrigsby/mlx-stack/internal/backend"
 )
 
-// ManagedBackend is what tags/embed/audio/external backends implement so the
-// router can proxy to them.
-type ManagedBackend interface {
-	Alias() string
-	BaseURL() string
-	UpstreamModel() string
-	Running() bool
-}
-
-type ResolveKind int
-
-const (
-	ResolveUnknown ResolveKind = iota
-	ResolveChat
-	ResolveManaged
-)
-
-// Registry maps a request's model alias to either the chat backend
-// (resolved by EnsureProfile + ChatSwapper) or a ManagedBackend (proxy
-// straight through).
+// Registry maps backend names (and aliases) to backend.Backend instances.
 type Registry struct {
-	cfg     *config.Config
-	chat    ChatSwapper
-	managed map[string]ManagedBackend
+	byName map[string]backend.Backend
 }
 
-// NewRegistry takes the chat swapper and any number of managed backends
-// (nil values are ignored). Aliases registered by managed backends shadow
-// matching chat-profile names — but in practice that should never happen
-// because Config.Validate would have rejected the collision (TODO).
-func NewRegistry(cfg *config.Config, chat ChatSwapper, managedBackends ...ManagedBackend) *Registry {
-	m := map[string]ManagedBackend{}
-	for _, mb := range managedBackends {
-		if mb == nil || mb.Alias() == "" {
+func NewRegistry(backends ...backend.Backend) *Registry {
+	r := &Registry{byName: map[string]backend.Backend{}}
+	for _, b := range backends {
+		if b == nil {
 			continue
 		}
-		m[mb.Alias()] = mb
+		r.byName[b.Name()] = b
 	}
-	return &Registry{cfg: cfg, chat: chat, managed: m}
+	return r
 }
 
-// Resolve returns ResolveChat if alias names a chat profile, ResolveManaged
-// (with the backend) if it names a managed alias, or an error otherwise.
-func (r *Registry) Resolve(_ context.Context, alias string) (ResolveKind, ManagedBackend, error) {
-	if _, ok := r.cfg.Chat.Profiles[alias]; ok {
-		return ResolveChat, nil, nil
+// RegisterAlias adds another name that resolves to b. Used for swap group
+// members so each member name routes to the owning Group.
+func (r *Registry) RegisterAlias(alias string, b backend.Backend) {
+	if b == nil || alias == "" {
+		return
 	}
-	if mb, ok := r.managed[alias]; ok {
-		return ResolveManaged, mb, nil
-	}
-	return ResolveUnknown, nil, fmt.Errorf("unknown model %q", alias)
+	r.byName[alias] = b
 }
 
-// ManagedList returns all registered managed backends (any order).
-func (r *Registry) ManagedList() []ManagedBackend {
-	out := make([]ManagedBackend, 0, len(r.managed))
-	for _, m := range r.managed {
-		out = append(out, m)
+func (r *Registry) Resolve(_ context.Context, name string) (backend.Backend, error) {
+	b, ok := r.byName[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown backend %q", name)
+	}
+	return b, nil
+}
+
+// All returns the distinct set of registered backends (an alias and a
+// backend's primary name may both resolve to the same Backend; All
+// deduplicates).
+func (r *Registry) All() []backend.Backend {
+	seen := map[backend.Backend]bool{}
+	out := []backend.Backend{}
+	for _, b := range r.byName {
+		if !seen[b] {
+			seen[b] = true
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// Names returns every registered name (including aliases), unsorted.
+func (r *Registry) Names() []string {
+	out := make([]string, 0, len(r.byName))
+	for n := range r.byName {
+		out = append(out, n)
 	}
 	return out
 }

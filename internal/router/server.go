@@ -2,7 +2,6 @@ package router
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,36 +9,27 @@ import (
 	"github.com/guygrigsby/mlx-stack/internal/config"
 )
 
-// ChatSwapper is the subset of supervisor.ChatSwap that the router uses.
-type ChatSwapper interface {
-	EnsureProfile(ctx context.Context, name string) error
-	UpstreamModel(name string) string
-	BaseURL() string
-}
-
 type ServerOpts struct {
 	Config   *config.Config
-	Chat     ChatSwapper // required for ResolveChat path
-	Registry *Registry  // optional; built from Config + Chat if nil
+	Registry *Registry
+	Names    []string // for catalog; if empty, derive from Registry
 }
 
 type Server struct {
 	cfg      *config.Config
-	chat     ChatSwapper
 	registry *Registry
 	catalog  *Catalog
 }
 
 func NewServer(opts ServerOpts) *Server {
-	reg := opts.Registry
-	if reg == nil {
-		reg = NewRegistry(opts.Config, opts.Chat)
+	names := opts.Names
+	if len(names) == 0 && opts.Registry != nil {
+		names = opts.Registry.Names()
 	}
 	return &Server{
 		cfg:      opts.Config,
-		chat:     opts.Chat,
-		registry: reg,
-		catalog:  NewCatalog(opts.Config),
+		registry: opts.Registry,
+		catalog:  NewCatalog(names),
 	}
 }
 
@@ -78,26 +68,20 @@ func (s *Server) handleProxyByModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kind, mb, err := s.registry.Resolve(r.Context(), model)
+	b, err := s.registry.Resolve(r.Context(), model)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
 
-	switch kind {
-	case ResolveChat:
-		if err := s.chat.EnsureProfile(r.Context(), model); err != nil {
-			http.Error(w, "ensure profile: "+err.Error(), 502)
-			return
-		}
-		_ = ProxyJSON(w, r, s.chat.BaseURL(), s.chat.UpstreamModel(model))
-	case ResolveManaged:
-		upstream := mb.UpstreamModel()
-		if upstream == "" {
-			upstream = model // audio: pass the per-request model field through
-		}
-		_ = ProxyJSON(w, r, mb.BaseURL(), upstream)
-	default:
-		http.Error(w, "unknown model", 400)
+	if err := b.EnsureLoaded(r.Context(), model); err != nil {
+		http.Error(w, "ensure: "+err.Error(), 502)
+		return
 	}
+
+	upstream := b.UpstreamModel()
+	if upstream == "" {
+		upstream = model // audio: multiplex on the per-request model
+	}
+	_ = ProxyJSON(w, r, b.BaseURL(), upstream)
 }
