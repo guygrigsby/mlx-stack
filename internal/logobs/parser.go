@@ -40,6 +40,7 @@ type WatchdogEvent struct {
 
 type Event struct {
 	Raw      string
+	Worker   string
 	Kind     Kind
 	Mem      MemSnapshot
 	Timing   Timing

@@ -9,6 +9,7 @@ import (
 
 	"github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
+	"github.com/guygrigsby/mlx-stack/internal/logobs"
 )
 
 type ChatController interface {
@@ -28,6 +29,7 @@ type Handlers struct {
 	Config *config.Config
 	Chat   ChatController
 	Tags   TagsController
+	Broker *logobs.Broker
 }
 
 type ChatStatus struct {
@@ -65,6 +67,7 @@ func (h *Handlers) Mux() http.Handler {
 	mux.HandleFunc("POST /v1/start", h.start)
 	mux.HandleFunc("POST /v1/stop", h.stop)
 	mux.HandleFunc("POST /v1/restart", h.restart)
+	mux.HandleFunc("GET /v1/logs/tail", h.tail)
 	return mux
 }
 
@@ -170,4 +173,28 @@ func (h *Handlers) restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write([]byte(`{"ok":true}`))
+}
+
+func (h *Handlers) tail(w http.ResponseWriter, r *http.Request) {
+	if h.Broker == nil {
+		http.Error(w, "broker not configured", 503)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(200)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	events := h.Broker.Subscribe(r.Context())
+	for ev := range events {
+		_, err := fmt.Fprintf(w, "data: %s\n\n", ev.Raw)
+		if err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 }

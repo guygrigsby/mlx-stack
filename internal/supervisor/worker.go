@@ -19,6 +19,7 @@ type WorkerSpec struct {
 	Args    []string
 	Env     []string
 	Logger  *slog.Logger
+	Broker  *logobs.Broker
 }
 
 type WorkerResult struct {
@@ -93,6 +94,7 @@ func (w *Worker) consumeStderr(r io.Reader) {
 		w.spec.Logger.Info("worker.stderr", "name", w.spec.Name, "pid", w.pid, "line", line)
 
 		if ev, ok := logobs.Parse(line); ok {
+			ev.Worker = w.spec.Name
 			select {
 			case w.events <- ev:
 			default:
@@ -104,6 +106,9 @@ func (w *Worker) consumeStderr(r io.Reader) {
 				case w.events <- ev:
 				default:
 				}
+			}
+			if w.spec.Broker != nil {
+				w.spec.Broker.Publish(ev)
 			}
 		}
 	}

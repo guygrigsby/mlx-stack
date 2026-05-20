@@ -14,6 +14,7 @@ import (
 
 	"github.com/guygrigsby/mlx-stack/internal/admin"
 	"github.com/guygrigsby/mlx-stack/internal/config"
+	"github.com/guygrigsby/mlx-stack/internal/logobs"
 	"github.com/guygrigsby/mlx-stack/internal/router"
 	"github.com/guygrigsby/mlx-stack/internal/supervisor"
 )
@@ -41,6 +42,8 @@ func main() {
 	}
 	logger.Info("config loaded", "path", *cfgPath, "router_port", cfg.Router.Port, "chat_port", cfg.Chat.Port)
 
+	broker := logobs.NewBroker()
+
 	chatSwap := supervisor.NewChatSwap(supervisor.ChatSwapOpts{
 		Host:           cfg.Chat.Host,
 		Port:           cfg.Chat.Port,
@@ -54,6 +57,7 @@ func main() {
 				Args:    args,
 				Env:     workerEnv(cfg),
 				Logger:  logger,
+				Broker:  broker,
 			})
 		},
 		WorkerEnv: workerEnv(cfg),
@@ -82,6 +86,7 @@ func main() {
 					Args:    args,
 					Env:     tagsEnv(cfg),
 					Logger:  logger,
+					Broker:  broker,
 				})
 			},
 		})
@@ -111,7 +116,7 @@ func main() {
 				},
 				WorkerFactory: func(args []string) *supervisor.Worker {
 					return supervisor.New(supervisor.WorkerSpec{
-						Name: "embed", Command: cfg.PythonBin, Args: args, Logger: logger,
+						Name: "embed", Command: cfg.PythonBin, Args: args, Logger: logger, Broker: broker,
 					})
 				},
 			})
@@ -127,7 +132,7 @@ func main() {
 		}
 	}
 
-	ttsMgr := buildAudioManaged("tts", cfg.TTS, cfg.PythonBin, logger)
+	ttsMgr := buildAudioManaged("tts", cfg.TTS, cfg.PythonBin, logger, broker)
 	if ttsMgr != nil {
 		if err := ttsMgr.Start(context.Background()); err != nil {
 			logger.Error("tts start failed", "err", err)
@@ -137,7 +142,7 @@ func main() {
 		}
 	}
 
-	kokoroMgr := buildAudioManaged("kokoro", cfg.Kokoro, cfg.PythonBin, logger)
+	kokoroMgr := buildAudioManaged("kokoro", cfg.Kokoro, cfg.PythonBin, logger, broker)
 	if kokoroMgr != nil {
 		if err := kokoroMgr.Start(context.Background()); err != nil {
 			logger.Error("kokoro start failed", "err", err)
@@ -174,7 +179,7 @@ func main() {
 
 	adminSrv := &admin.Server{
 		SocketPath: *socketPath,
-		Handler:    (&admin.Handlers{Config: cfg, Chat: chatSwap, Tags: tagsMgr}).Mux(),
+		Handler:    (&admin.Handlers{Config: cfg, Chat: chatSwap, Tags: tagsMgr, Broker: broker}).Mux(),
 	}
 
 	if err := adminSrv.Start(); err != nil {
@@ -268,7 +273,7 @@ func tagsEnv(cfg *config.Config) []string {
 	return env
 }
 
-func buildAudioManaged(name string, ai config.AudioInstance, pythonBin string, logger *slog.Logger) *supervisor.Managed {
+func buildAudioManaged(name string, ai config.AudioInstance, pythonBin string, logger *slog.Logger, broker *logobs.Broker) *supervisor.Managed {
 	if ai.Alias == "" {
 		return nil
 	}
@@ -286,7 +291,7 @@ func buildAudioManaged(name string, ai config.AudioInstance, pythonBin string, l
 		},
 		WorkerFactory: func(args []string) *supervisor.Worker {
 			return supervisor.New(supervisor.WorkerSpec{
-				Name: name, Command: pythonBin, Args: args, Logger: logger,
+				Name: name, Command: pythonBin, Args: args, Logger: logger, Broker: broker,
 			})
 		},
 	})

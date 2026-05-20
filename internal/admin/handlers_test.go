@@ -1,14 +1,18 @@
 package admin
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
+	"github.com/guygrigsby/mlx-stack/internal/logobs"
 )
 
 type fakeChat struct {
@@ -125,5 +129,42 @@ func TestHandler_StatusWithTags(t *testing.T) {
 	}
 	if resp.Tags.Alias != "qwen-tags" || resp.Tags.PID != 12999 || resp.Tags.Running != true {
 		t.Errorf("tags status: %+v", *resp.Tags)
+	}
+}
+
+func TestHandler_LogsTail(t *testing.T) {
+	broker := logobs.NewBroker()
+	h := newTestHandlers()
+	h.Broker = broker
+	mux := h.Mux()
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/v1/logs/tail", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Give the subscription a moment to register.
+	time.Sleep(50 * time.Millisecond)
+	broker.Publish(logobs.Event{Raw: "[mlx-launch] test-line"})
+
+	scanner := bufio.NewScanner(resp.Body)
+	gotLine := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "test-line") {
+			gotLine = true
+			break
+		}
+	}
+	if !gotLine {
+		t.Errorf("did not receive published event via SSE")
 	}
 }
