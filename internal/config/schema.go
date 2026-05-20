@@ -1,52 +1,16 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Config struct {
 	LogDir     string        `toml:"log_dir"`
 	ModelsRoot string        `toml:"models_root"`
 	PythonBin  string        `toml:"python_bin"`
 	Router     Router        `toml:"router"`
-	Chat       Chat          `toml:"chat"`
-	Tags       Tags          `toml:"tags"`
-	Embed      Embed         `toml:"embed"`
-	TTS        AudioInstance `toml:"tts"`
-	Kokoro     AudioInstance `toml:"kokoro"`
-}
-
-type AudioInstance struct {
-	Host   string   `toml:"host"`
-	Port   int      `toml:"port"`
-	Engine string   `toml:"engine"` // must be "audio" (validated)
-	Models []string `toml:"models"` // optional: model paths to eagerly preload (Phase 4.5)
-	Alias  string   `toml:"alias"`
-	Cache  Cache    `toml:"cache"`
-	Memlog Memlog   `toml:"memlog"`
-}
-
-func (a AudioInstance) Validate(name string) error {
-	if a.Alias == "" && a.Port == 0 && len(a.Models) == 0 {
-		return nil // not configured
-	}
-	if a.Port <= 0 || a.Port > 65535 {
-		return fmt.Errorf("%s.port: must be 1..65535, got %d", name, a.Port)
-	}
-	if a.Engine != "" && a.Engine != "audio" {
-		return fmt.Errorf("%s.engine: must be 'audio', got %q", name, a.Engine)
-	}
-	if a.Alias == "" {
-		return fmt.Errorf("%s.alias: required when %s configured", name, name)
-	}
-	return nil
-}
-
-type Embed struct {
-	Managed bool   `toml:"managed"`
-	Host    string `toml:"host"`
-	Port    int    `toml:"port"`
-	Model   string `toml:"model"`
-	Alias   string `toml:"alias"`
-	URL     string `toml:"url"`
+	Defaults   Defaults      `toml:"defaults"`
+	Backends   []BackendSpec `toml:"backend"`
 }
 
 type Router struct {
@@ -56,21 +20,28 @@ type Router struct {
 	AllowedOrigins []string `toml:"allowed_origins"`
 }
 
-type Chat struct {
-	DefaultProfile string             `toml:"default_profile"`
-	Host           string             `toml:"host"`
-	Port           int                `toml:"port"`
-	SwapTimeoutSec int                `toml:"swap_timeout_sec"`
-	Cache          Cache              `toml:"cache"`
-	Watchdog       Watchdog           `toml:"watchdog"`
-	Memlog         Memlog             `toml:"memlog"`
-	Profiles       map[string]Profile `toml:"profiles"`
+type Defaults struct {
+	Cache    Cache    `toml:"cache"`
+	Watchdog Watchdog `toml:"watchdog"`
+	Memlog   Memlog   `toml:"memlog"`
 }
 
-type Profile struct {
-	Model  string `toml:"model"`
-	Draft  string `toml:"draft"`
-	Engine string `toml:"engine"`
+// BackendSpec is one entry in the [[backend]] array-of-tables.
+type BackendSpec struct {
+	Name          string    `toml:"name"`
+	Engine        string    `toml:"engine"`
+	Mode          string    `toml:"mode"`           // "swap" | "persistent" | "external"
+	Group         string    `toml:"group"`          // for swap mode; defaults to Name
+	Default       bool      `toml:"default"`        // for swap members: auto-load on group start
+	Host          string    `toml:"host"`
+	Port          int       `toml:"port"`
+	Model         string    `toml:"model"`
+	DraftModel    string    `toml:"draft_model"`
+	URL           string    `toml:"url"`            // mode=external
+	UpstreamModel string    `toml:"upstream_model"` // mode=external
+	Cache         *Cache    `toml:"cache"`          // optional override
+	Watchdog      *Watchdog `toml:"watchdog"`
+	Memlog        *Memlog   `toml:"memlog"`
 }
 
 type Cache struct {
@@ -89,15 +60,25 @@ type Memlog struct {
 	IntervalSec int `toml:"interval_sec"`
 }
 
-type Tags struct {
-	Host     string   `toml:"host"`
-	Port     int      `toml:"port"`
-	Model    string   `toml:"model"`
-	Engine   string   `toml:"engine"`
-	Alias    string   `toml:"alias"`
-	Cache    Cache    `toml:"cache"`
-	Watchdog Watchdog `toml:"watchdog"`
-	Memlog   Memlog   `toml:"memlog"`
+func (b BackendSpec) EffectiveCache(d Defaults) Cache {
+	if b.Cache == nil {
+		return d.Cache
+	}
+	return *b.Cache
+}
+
+func (b BackendSpec) EffectiveWatchdog(d Defaults) Watchdog {
+	if b.Watchdog == nil {
+		return d.Watchdog
+	}
+	return *b.Watchdog
+}
+
+func (b BackendSpec) EffectiveMemlog(d Defaults) Memlog {
+	if b.Memlog == nil {
+		return d.Memlog
+	}
+	return *b.Memlog
 }
 
 func (c *Config) Validate() error {
@@ -112,59 +93,123 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("router.extra_ports: %d out of range", p)
 		}
 	}
-	if c.Chat.Port <= 0 || c.Chat.Port > 65535 {
-		return fmt.Errorf("chat.port: must be 1..65535, got %d", c.Chat.Port)
+	if len(c.Backends) == 0 {
+		return fmt.Errorf("at least one [[backend]] entry required")
 	}
-	if len(c.Chat.Profiles) == 0 {
-		return fmt.Errorf("chat.profiles: at least one required")
-	}
-	if _, ok := c.Chat.Profiles[c.Chat.DefaultProfile]; !ok {
-		return fmt.Errorf("chat.default_profile %q: not found among profiles", c.Chat.DefaultProfile)
-	}
-	for name, prof := range c.Chat.Profiles {
-		if prof.Model == "" {
-			return fmt.Errorf("chat.profiles.%s.model: required", name)
+
+	validEngines := map[string]bool{"lm": true, "vlm": true, "audio": true, "embed": true}
+	seen := map[string]bool{}
+	groupPorts := map[string]int{}
+	groupDefaults := map[string]int{}
+
+	for i, b := range c.Backends {
+		idx := fmt.Sprintf("backend[%d:%s]", i, b.Name)
+		if b.Name == "" {
+			return fmt.Errorf("%s: name required", idx)
 		}
-		if prof.Engine != "lm" && prof.Engine != "vlm" {
-			return fmt.Errorf("chat.profiles.%s.engine: must be 'lm' or 'vlm', got %q", name, prof.Engine)
+		if seen[b.Name] {
+			return fmt.Errorf("%s: duplicate name %q", idx, b.Name)
 		}
-	}
-	if c.Tags.Model != "" || c.Tags.Port != 0 || c.Tags.Alias != "" {
-		if c.Tags.Port <= 0 || c.Tags.Port > 65535 {
-			return fmt.Errorf("tags.port: must be 1..65535, got %d", c.Tags.Port)
-		}
-		if c.Tags.Model == "" {
-			return fmt.Errorf("tags.model: required when tags configured")
-		}
-		if c.Tags.Engine != "lm" && c.Tags.Engine != "vlm" {
-			return fmt.Errorf("tags.engine: must be 'lm' or 'vlm', got %q", c.Tags.Engine)
-		}
-		if c.Tags.Alias == "" {
-			return fmt.Errorf("tags.alias: required when tags configured")
-		}
-	}
-	if c.Embed.Alias != "" || c.Embed.Model != "" || c.Embed.URL != "" || c.Embed.Port != 0 {
-		if c.Embed.Alias == "" {
-			return fmt.Errorf("embed.alias: required when embed configured")
-		}
-		if c.Embed.Managed {
-			if c.Embed.Port <= 0 || c.Embed.Port > 65535 {
-				return fmt.Errorf("embed.port: must be 1..65535, got %d", c.Embed.Port)
+		seen[b.Name] = true
+
+		switch b.Mode {
+		case "swap":
+			if b.Engine != "lm" && b.Engine != "vlm" {
+				return fmt.Errorf("%s.engine: must be 'lm' or 'vlm' for swap mode, got %q", idx, b.Engine)
 			}
-			if c.Embed.Model == "" {
-				return fmt.Errorf("embed.model: required when embed managed")
+			if b.Model == "" {
+				return fmt.Errorf("%s.model: required", idx)
 			}
-		} else {
-			if c.Embed.URL == "" {
-				return fmt.Errorf("embed.url: required when embed external (managed=false)")
+			if b.Host == "" || b.Port <= 0 {
+				return fmt.Errorf("%s: host+port required", idx)
 			}
+			group := b.Group
+			if group == "" {
+				return fmt.Errorf("%s.group: required for swap mode", idx)
+			}
+			if p, ok := groupPorts[group]; ok && p != b.Port {
+				return fmt.Errorf("%s.port: swap members of group %q must share a port (got %d vs %d)", idx, group, b.Port, p)
+			}
+			groupPorts[group] = b.Port
+			if b.Default {
+				groupDefaults[group]++
+			}
+		case "persistent":
+			if !validEngines[b.Engine] {
+				return fmt.Errorf("%s.engine: must be lm|vlm|audio|embed, got %q", idx, b.Engine)
+			}
+			if b.Host == "" || b.Port <= 0 {
+				return fmt.Errorf("%s: host+port required", idx)
+			}
+			if b.Engine != "audio" && b.Model == "" {
+				return fmt.Errorf("%s.model: required for engine=%s", idx, b.Engine)
+			}
+		case "external":
+			if b.URL == "" {
+				return fmt.Errorf("%s.url: required for external mode", idx)
+			}
+		default:
+			return fmt.Errorf("%s.mode: must be 'swap', 'persistent', or 'external', got %q", idx, b.Mode)
 		}
 	}
-	if err := c.TTS.Validate("tts"); err != nil {
-		return err
-	}
-	if err := c.Kokoro.Validate("kokoro"); err != nil {
-		return err
+
+	for g, n := range groupDefaults {
+		if n > 1 {
+			return fmt.Errorf("group %q: only one backend may have default=true (got %d)", g, n)
+		}
 	}
 	return nil
+}
+
+// BackendsByGroup returns swap-mode backends grouped by their Group name,
+// preserving declaration order within each group.
+func (c *Config) BackendsByGroup() map[string][]BackendSpec {
+	out := map[string][]BackendSpec{}
+	for _, b := range c.Backends {
+		if b.Mode == "swap" {
+			out[b.Group] = append(out[b.Group], b)
+		}
+	}
+	return out
+}
+
+func (c *Config) Persistents() []BackendSpec {
+	out := []BackendSpec{}
+	for _, b := range c.Backends {
+		if b.Mode == "persistent" {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func (c *Config) Externals() []BackendSpec {
+	out := []BackendSpec{}
+	for _, b := range c.Backends {
+		if b.Mode == "external" {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// AllNames returns every backend name and every swap group name
+// (groups may not match a backend name; e.g. group "chat" has members
+// "valkyrie"/"scout"). The router's catalog and registry consume this.
+func (c *Config) AllNames() []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, b := range c.Backends {
+		if !seen[b.Name] {
+			seen[b.Name] = true
+			out = append(out, b.Name)
+		}
+	}
+	for _, b := range c.Backends {
+		if b.Mode == "swap" && !seen[b.Group] {
+			seen[b.Group] = true
+			out = append(out, b.Group)
+		}
+	}
+	return out
 }

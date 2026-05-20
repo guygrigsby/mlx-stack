@@ -5,262 +5,162 @@ import (
 	"testing"
 )
 
-func TestValidate_OK(t *testing.T) {
-	c := &Config{
-		LogDir:     "/tmp/logs",
-		ModelsRoot: "/tmp/models",
-		PythonBin:  "/usr/bin/python",
-		Router: Router{Host: "127.0.0.1", Port: 1231, ExtraPorts: []int{}},
-		Chat: Chat{
-			DefaultProfile: "p1",
-			Host:           "127.0.0.1",
-			Port:           1234,
-			SwapTimeoutSec: 30,
-			Profiles: map[string]Profile{
-				"p1": {Model: "/tmp/models/p1", Engine: "lm"},
-			},
+func minCfg() *Config {
+	return &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1230},
+		Backends: []BackendSpec{
+			{Name: "embed", Engine: "embed", Mode: "persistent", Host: "127.0.0.1", Port: 1236, Model: "/m"},
 		},
 	}
+}
+
+func TestValidate_MinimalOK(t *testing.T) {
+	if err := minCfg().Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_NoBackends(t *testing.T) {
+	c := &Config{PythonBin: "/x", Router: Router{Host: "x", Port: 1}}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "[[backend]]") {
+		t.Fatalf("want backends-required error: %v", err)
+	}
+}
+
+func TestValidate_SwapGroupSharedPort(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends,
+		BackendSpec{Name: "valkyrie", Engine: "lm", Mode: "swap", Group: "chat", Host: "127.0.0.1", Port: 1234, Model: "/m/v", Default: true},
+		BackendSpec{Name: "scout", Engine: "vlm", Mode: "swap", Group: "chat", Host: "127.0.0.1", Port: 1234, Model: "/m/s"},
+	)
 	if err := c.Validate(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected: %v", err)
 	}
 }
 
-func TestValidate_MissingPythonBin(t *testing.T) {
-	c := &Config{Router: Router{Host: "127.0.0.1", Port: 1231}, Chat: minChat()}
+func TestValidate_SwapGroupMismatchedPort(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends,
+		BackendSpec{Name: "a", Engine: "lm", Mode: "swap", Group: "chat", Host: "127.0.0.1", Port: 1234, Model: "/m"},
+		BackendSpec{Name: "b", Engine: "lm", Mode: "swap", Group: "chat", Host: "127.0.0.1", Port: 1235, Model: "/m"},
+	)
 	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "python_bin") {
-		t.Fatalf("expected python_bin error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "must share a port") {
+		t.Fatalf("want share-a-port error: %v", err)
 	}
 }
 
-func TestValidate_DefaultProfileMustExist(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat: Chat{
-			DefaultProfile: "ghost",
-			Host:           "127.0.0.1",
-			Port:           1234,
-			Profiles:       map[string]Profile{"p1": {Model: "/tmp", Engine: "lm"}},
-		},
-	}
+func TestValidate_SwapMissingGroup(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends, BackendSpec{Name: "v", Engine: "lm", Mode: "swap", Host: "x", Port: 1, Model: "/m"})
 	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "default_profile") {
-		t.Fatalf("expected default_profile error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "group") {
+		t.Fatalf("want group error: %v", err)
 	}
 }
 
-func TestValidate_ProfileEngineMustBeLmOrVlm(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat: Chat{
-			DefaultProfile: "p1",
-			Host:           "127.0.0.1",
-			Port:           1234,
-			Profiles:       map[string]Profile{"p1": {Model: "/tmp", Engine: "audio"}},
-		},
+func TestValidate_DuplicateName(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends, BackendSpec{Name: "embed", Engine: "lm", Mode: "swap", Group: "g", Host: "x", Port: 1, Model: "/m"})
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("want duplicate error: %v", err)
 	}
+}
+
+func TestValidate_InvalidMode(t *testing.T) {
+	c := minCfg()
+	c.Backends[0].Mode = "bogus"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("want mode error: %v", err)
+	}
+}
+
+func TestValidate_InvalidEngine(t *testing.T) {
+	c := minCfg()
+	c.Backends[0].Engine = "foobar"
 	err := c.Validate()
 	if err == nil || !strings.Contains(err.Error(), "engine") {
-		t.Fatalf("expected engine error, got: %v", err)
+		t.Fatalf("want engine error: %v", err)
 	}
 }
 
-func TestValidate_PortRange(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 0},
-		Chat:      minChat(),
-	}
+func TestValidate_ExternalRequiresURL(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends, BackendSpec{Name: "remote", Mode: "external"})
 	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "router.port") {
-		t.Fatalf("expected router.port error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "url") {
+		t.Fatalf("want url error: %v", err)
 	}
 }
 
-func TestValidate_TagsOK(t *testing.T) {
+func TestValidate_ExternalOK(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends, BackendSpec{Name: "remote", Mode: "external", URL: "http://x:1"})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_AudioPersistentNoModelOK(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends, BackendSpec{Name: "tts", Engine: "audio", Mode: "persistent", Host: "127.0.0.1", Port: 1237})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_PersistentLmRequiresModel(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends, BackendSpec{Name: "x", Engine: "lm", Mode: "persistent", Host: "127.0.0.1", Port: 1238})
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("want model error: %v", err)
+	}
+}
+
+func TestValidate_TwoSwapDefaultsInGroup(t *testing.T) {
+	c := minCfg()
+	c.Backends = append(c.Backends,
+		BackendSpec{Name: "a", Engine: "lm", Mode: "swap", Group: "g", Host: "127.0.0.1", Port: 1, Model: "/m", Default: true},
+		BackendSpec{Name: "b", Engine: "lm", Mode: "swap", Group: "g", Host: "127.0.0.1", Port: 1, Model: "/m", Default: true},
+	)
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "default=true") {
+		t.Fatalf("want default error: %v", err)
+	}
+}
+
+func TestEffectiveOverrides(t *testing.T) {
+	defaults := Defaults{
+		Cache:    Cache{LimitBytes: 1000},
+		Watchdog: Watchdog{KVHeadroomBytes: 2000},
+	}
+	b := BackendSpec{Watchdog: &Watchdog{KVHeadroomBytes: 99}}
+	if b.EffectiveCache(defaults).LimitBytes != 1000 {
+		t.Errorf("default cache lost")
+	}
+	if b.EffectiveWatchdog(defaults).KVHeadroomBytes != 99 {
+		t.Errorf("override lost")
+	}
+}
+
+func TestBackendsByGroup(t *testing.T) {
 	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Tags: Tags{
-			Host:   "127.0.0.1",
-			Port:   1235,
-			Model:  "/m/qwen-tags",
-			Engine: "vlm",
-			Alias:  "qwen-tags",
+		Backends: []BackendSpec{
+			{Name: "a", Mode: "swap", Group: "chat"},
+			{Name: "b", Mode: "swap", Group: "chat"},
+			{Name: "c", Mode: "persistent"},
 		},
 	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("unexpected: %v", err)
+	groups := c.BackendsByGroup()
+	if len(groups["chat"]) != 2 {
+		t.Errorf("chat group: %d", len(groups["chat"]))
 	}
-}
-
-func TestValidate_TagsZeroValueOK(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("tags zero-value must validate: %v", err)
-	}
-}
-
-func TestValidate_TagsBadEngine(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Tags: Tags{
-			Host:   "127.0.0.1",
-			Port:   1235,
-			Model:  "/m",
-			Engine: "audio",
-			Alias:  "x",
-		},
-	}
-	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "tags.engine") {
-		t.Fatalf("want tags.engine error: %v", err)
-	}
-}
-
-func TestValidate_TagsMissingAlias(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Tags: Tags{
-			Host:   "127.0.0.1",
-			Port:   1235,
-			Model:  "/m",
-			Engine: "lm",
-			Alias:  "",
-		},
-	}
-	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "tags.alias") {
-		t.Fatalf("want tags.alias error: %v", err)
-	}
-}
-
-func TestValidate_EmbedManaged(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Embed:     Embed{Managed: true, Host: "127.0.0.1", Port: 1236, Model: "/m/e", Alias: "embed"},
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-}
-
-func TestValidate_EmbedExternal(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Embed:     Embed{Managed: false, URL: "http://other.local:1236", Alias: "embed"},
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-}
-
-func TestValidate_EmbedZeroValue(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("embed zero-value must validate: %v", err)
-	}
-}
-
-func TestValidate_EmbedManagedMissingModel(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Embed:     Embed{Managed: true, Port: 1236, Alias: "embed"},
-	}
-	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "embed.model") {
-		t.Fatalf("want embed.model error: %v", err)
-	}
-}
-
-func TestValidate_EmbedExternalMissingURL(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Embed:     Embed{Managed: false, Alias: "embed"},
-	}
-	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "embed.url") {
-		t.Fatalf("want embed.url error: %v", err)
-	}
-}
-
-func minChat() Chat {
-	return Chat{
-		DefaultProfile: "p1",
-		Host:           "127.0.0.1",
-		Port:           1234,
-		Profiles:       map[string]Profile{"p1": {Model: "/tmp", Engine: "lm"}},
-	}
-}
-
-func TestValidate_AudioTTSOK(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		TTS:       AudioInstance{Host: "127.0.0.1", Port: 1237, Engine: "audio", Alias: "tts"},
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-}
-
-func TestValidate_AudioKokoroOK(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		Kokoro:    AudioInstance{Host: "127.0.0.1", Port: 8880, Engine: "audio", Alias: "kokoro"},
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-}
-
-func TestValidate_AudioZeroValueOK(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("audio zero-value must validate: %v", err)
-	}
-}
-
-func TestValidate_AudioBadEngine(t *testing.T) {
-	c := &Config{
-		PythonBin: "/usr/bin/python",
-		Router:    Router{Host: "127.0.0.1", Port: 1231},
-		Chat:      minChat(),
-		TTS:       AudioInstance{Host: "127.0.0.1", Port: 1237, Engine: "lm", Alias: "tts"},
-	}
-	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "tts.engine") {
-		t.Fatalf("want tts.engine error: %v", err)
+	if _, ok := groups["c"]; ok {
+		t.Errorf("persistent backend should not appear in groups")
 	}
 }

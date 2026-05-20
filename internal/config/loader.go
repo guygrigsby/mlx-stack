@@ -15,9 +15,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config load %s: %w", path, err)
 	}
-	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		keys := make([]string, 0, len(undecoded))
-		for _, k := range undecoded {
+	if u := md.Undecoded(); len(u) > 0 {
+		keys := make([]string, 0, len(u))
+		for _, k := range u {
 			keys = append(keys, k.String())
 		}
 		return nil, fmt.Errorf("config %s: unknown keys: %s", path, strings.Join(keys, ", "))
@@ -26,18 +26,18 @@ func Load(path string) (*Config, error) {
 	c.LogDir = expandHome(c.LogDir)
 	c.ModelsRoot = expandHome(c.ModelsRoot)
 	c.PythonBin = expandHome(c.PythonBin)
-	c.Tags.Model = expandHome(c.Tags.Model)
-	c.Embed.Model = expandHome(c.Embed.Model)
-	for name, prof := range c.Chat.Profiles {
-		prof.Model = expandHome(prof.Model)
-		prof.Draft = expandHome(prof.Draft)
-		c.Chat.Profiles[name] = prof
-	}
-	for i, m := range c.TTS.Models {
-		c.TTS.Models[i] = expandHome(m)
-	}
-	for i, m := range c.Kokoro.Models {
-		c.Kokoro.Models[i] = expandHome(m)
+
+	for i := range c.Backends {
+		c.Backends[i].Model = expandHome(c.Backends[i].Model)
+		c.Backends[i].DraftModel = expandHome(c.Backends[i].DraftModel)
+
+		// Mode-specific defaults
+		if c.Backends[i].Mode == "swap" && c.Backends[i].Group == "" {
+			c.Backends[i].Group = c.Backends[i].Name
+		}
+		if c.Backends[i].Mode == "external" && c.Backends[i].UpstreamModel == "" {
+			c.Backends[i].UpstreamModel = c.Backends[i].Name
+		}
 	}
 
 	if err := c.Validate(); err != nil {
