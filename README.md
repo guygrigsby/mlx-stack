@@ -2,7 +2,19 @@
 
 Single-daemon replacement for a multi-script MLX inference setup. One Go binary supervises any number of named MLX models (chat, vision, embedding, audio), exposes them as OpenAI-compatible HTTP endpoints, and hot-swaps members of a shared port. See `docs/2026-05-19-mlx-stack-design.md` and `docs/2026-05-19-mlx-stack-phase-8-unified-backends.md` for the design.
 
-## Build
+Built on Apple's [MLX](https://github.com/ml-explore/mlx) framework (via `mlx_lm`, `mlx_vlm`, `mlx_embeddings`, `mlx_audio`).
+
+## Install via Homebrew
+
+    brew install --HEAD guygrigsby/mlx-stack/mlx-stack
+
+(Requires tapping `guygrigsby/mlx-stack` first, or `brew install --HEAD ./Formula/mlx-stack.rb` from a local clone.)
+
+After install, the Python launcher shim must be installed into the venv that has `mlx_lm`:
+
+    ~/venvs/mlx/bin/pip install -e "$(brew --prefix mlx-stack)/share/mlx-stack/python"
+
+## Build from source
 
     make build
 
