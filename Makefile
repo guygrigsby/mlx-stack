@@ -1,4 +1,4 @@
-.PHONY: build test test-go test-py install clean fakemlx install-launchd uninstall-launchd
+.PHONY: build test test-go test-py install clean fakemlx install-launchd uninstall-launchd dev
 
 GOFLAGS    ?=
 PYTHON_BIN ?= $(HOME)/venvs/mlx/bin/python
@@ -47,4 +47,20 @@ uninstall-launchd:
 		echo "Removed $(LAUNCHD_PLIST)"; \
 	else \
 		echo "No plist at $(LAUNCHD_PLIST)"; \
+	fi
+
+LAUNCHD_LABEL = dev.grigsby.mlxd
+
+# Build + install binaries, then restart the launchd-managed mlxd so the new
+# binary takes effect. Fast iteration target for framework changes.
+dev: install
+	@if launchctl list | awk '{print $$3}' | grep -qx "$(LAUNCHD_LABEL)"; then \
+		launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL) && \
+		echo "Kickstarted $(LAUNCHD_LABEL) — new binaries live"; \
+	else \
+		echo "$(LAUNCHD_LABEL) is not loaded in launchd."; \
+		echo "Load it once with:"; \
+		echo "    make install-launchd"; \
+		echo "    launchctl load $(LAUNCHD_PLIST)"; \
+		exit 1; \
 	fi
