@@ -39,6 +39,12 @@ func (c *Catalog) List() []Model {
 	if c.cfg.Embed.Alias != "" {
 		out = append(out, Model{ID: c.cfg.Embed.Alias})
 	}
+	if c.cfg.TTS.Alias != "" {
+		out = append(out, Model{ID: c.cfg.TTS.Alias})
+	}
+	if c.cfg.Kokoro.Alias != "" {
+		out = append(out, Model{ID: c.cfg.Kokoro.Alias})
+	}
 	return out
 }
 

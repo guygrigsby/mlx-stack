@@ -48,6 +48,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", s.handleProxyByModel)
 	mux.HandleFunc("POST /v1/completions", s.handleProxyByModel)
 	mux.HandleFunc("POST /v1/embeddings", s.handleProxyByModel)
+	mux.HandleFunc("POST /v1/audio/speech", s.handleProxyByModel)
+	mux.HandleFunc("POST /v1/audio/transcriptions", s.handleProxyByModel)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	return mux
@@ -90,7 +92,11 @@ func (s *Server) handleProxyByModel(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = ProxyJSON(w, r, s.chat.BaseURL(), s.chat.UpstreamModel(model))
 	case ResolveManaged:
-		_ = ProxyJSON(w, r, mb.BaseURL(), mb.UpstreamModel())
+		upstream := mb.UpstreamModel()
+		if upstream == "" {
+			upstream = model // audio: pass the per-request model field through
+		}
+		_ = ProxyJSON(w, r, mb.BaseURL(), upstream)
 	default:
 		http.Error(w, "unknown model", 400)
 	}

@@ -127,12 +127,38 @@ func main() {
 		}
 	}
 
+	ttsMgr := buildAudioManaged("tts", cfg.TTS, cfg.PythonBin, logger)
+	if ttsMgr != nil {
+		if err := ttsMgr.Start(context.Background()); err != nil {
+			logger.Error("tts start failed", "err", err)
+			ttsMgr = nil
+		} else {
+			logger.Info("tts backend up", "alias", cfg.TTS.Alias, "url", ttsMgr.URL())
+		}
+	}
+
+	kokoroMgr := buildAudioManaged("kokoro", cfg.Kokoro, cfg.PythonBin, logger)
+	if kokoroMgr != nil {
+		if err := kokoroMgr.Start(context.Background()); err != nil {
+			logger.Error("kokoro start failed", "err", err)
+			kokoroMgr = nil
+		} else {
+			logger.Info("kokoro backend up", "alias", cfg.Kokoro.Alias, "url", kokoroMgr.URL())
+		}
+	}
+
 	var managedBackends []router.ManagedBackend
 	if tagsMgr != nil {
 		managedBackends = append(managedBackends, tagsMgr)
 	}
 	if embedBackend != nil {
 		managedBackends = append(managedBackends, embedBackend)
+	}
+	if ttsMgr != nil {
+		managedBackends = append(managedBackends, ttsMgr)
+	}
+	if kokoroMgr != nil {
+		managedBackends = append(managedBackends, kokoroMgr)
 	}
 	registry := router.NewRegistry(cfg, chatSwap, managedBackends...)
 	routerSrv := router.NewServer(router.ServerOpts{
@@ -176,6 +202,11 @@ func main() {
 	}
 	if tagsMgr != nil {
 		_ = tagsMgr.Stop(ctx)
+	}
+	for _, m := range []*supervisor.Managed{ttsMgr, kokoroMgr} {
+		if m != nil {
+			_ = m.Stop(ctx)
+		}
 	}
 	_ = chatSwap.Stop(ctx)
 	_ = httpSrv.Shutdown(ctx)
@@ -235,6 +266,30 @@ func tagsEnv(cfg *config.Config) []string {
 		env = append(env, fmt.Sprintf("MLX_MEMLOG_INTERVAL_SEC=%d", t.Memlog.IntervalSec))
 	}
 	return env
+}
+
+func buildAudioManaged(name string, ai config.AudioInstance, pythonBin string, logger *slog.Logger) *supervisor.Managed {
+	if ai.Alias == "" {
+		return nil
+	}
+	return supervisor.NewManaged(supervisor.ManagedOpts{
+		Name:          name,
+		Host:          ai.Host,
+		Port:          ai.Port,
+		Alias:         ai.Alias,
+		UpstreamModel: "", // mlx_audio.server multiplexes via the per-request "model" field
+		Args: []string{
+			"-m", "mlx_stack.launcher_shim",
+			"--engine", "audio",
+			"--host", ai.Host,
+			"--port", fmt.Sprintf("%d", ai.Port),
+		},
+		WorkerFactory: func(args []string) *supervisor.Worker {
+			return supervisor.New(supervisor.WorkerSpec{
+				Name: name, Command: pythonBin, Args: args, Logger: logger,
+			})
+		},
+	})
 }
 
 func setupLogger(level string, jsonOut bool) *slog.Logger {

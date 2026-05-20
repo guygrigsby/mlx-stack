@@ -59,6 +59,10 @@ func main() {
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	})
+	mux.HandleFunc("POST /v1/audio/speech", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Write([]byte("FAKE-AUDIO-BYTES"))
+	})
 	mux.HandleFunc("POST /v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = body // fakemlx is content-agnostic

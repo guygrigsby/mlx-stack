@@ -384,6 +384,80 @@ alias   = "embed"
 	}
 }
 
+func TestE2E_AudioSpeech(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	root := repoRoot(t)
+	buildAll(t, root)
+
+	dir := t.TempDir()
+	routerPort := freePort(t)
+	chatPort := freePort(t)
+	ttsPort := freePort(t)
+	sockPath := filepath.Join(dir, "admin.sock")
+
+	fakePython := filepath.Join(dir, "fake-python")
+	os.WriteFile(fakePython, []byte(fmt.Sprintf(`#!/bin/sh
+shift 4
+exec "%s/bin/fakemlx" --model "/tmp/audio-fake" "$@"
+`, root)), 0o755)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := fmt.Sprintf(`
+log_dir     = "%s"
+models_root = "%s"
+python_bin  = "%s"
+
+[router]
+host = "127.0.0.1"
+port = %d
+
+[chat]
+default_profile  = "p1"
+host             = "127.0.0.1"
+port             = %d
+swap_timeout_sec = 5
+  [chat.profiles.p1]
+  model  = "/tmp/p1"
+  engine = "lm"
+
+[tts]
+host   = "127.0.0.1"
+port   = %d
+engine = "audio"
+alias  = "tts"
+`, dir, dir, fakePython, routerPort, chatPort, ttsPort)
+	os.WriteFile(cfgPath, []byte(cfg), 0o644)
+
+	mlxd := exec.Command(filepath.Join(root, "bin", "mlxd"), "run",
+		"--config", cfgPath, "--socket", sockPath, "--log-level", "debug")
+	mlxd.Stdout = os.Stdout
+	mlxd.Stderr = os.Stderr
+	mlxd.Start()
+	defer func() { mlxd.Process.Signal(os.Interrupt); mlxd.Wait() }()
+	waitPort(t, "127.0.0.1", routerPort, 10*time.Second)
+	time.Sleep(500 * time.Millisecond)
+
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/v1/audio/speech", routerPort),
+		"application/json",
+		strings.NewReader(`{"model":"tts","input":"hello","voice":"omnivoice"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "FAKE-AUDIO-BYTES") {
+		t.Errorf("body: %s", body)
+	}
+}
+
 func TestE2E_EmbedExternal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
