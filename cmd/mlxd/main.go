@@ -36,7 +36,13 @@ func main() {
 	logLevel := cmdRun.String("log-level", "info", "debug|info|warn|error")
 	logJSON := cmdRun.Bool("log-json", false, "emit logs as JSON")
 	logDir := cmdRun.String("log-dir", "", "rotated log directory")
+	shimDirFlag := cmdRun.String("shim-dir", "", "directory containing the mlx_stack Python package (overrides auto-detection)")
 	cmdRun.Parse(os.Args[2:])
+
+	shimDir := *shimDirFlag
+	if shimDir == "" {
+		shimDir = detectShimDir()
+	}
 
 	logger, rotator := setupLogger(*logLevel, *logJSON, *logDir)
 	slog.SetDefault(logger)
@@ -89,7 +95,7 @@ func main() {
 					Name:    fmt.Sprintf("%s[%s]", gName, spec.Name),
 					Command: cfg.PythonBin,
 					Args:    launcherArgs(spec),
-					Env:     backendEnv(spec, cfg.Defaults),
+					Env:     backendEnv(spec, cfg.Defaults, shimDir),
 					Broker:  broker,
 					Logger:  logger,
 				})
@@ -115,7 +121,7 @@ func main() {
 					Name:    spec.Name,
 					Command: cfg.PythonBin,
 					Args:    args,
-					Env:     backendEnv(spec, cfg.Defaults),
+					Env:     backendEnv(spec, cfg.Defaults, shimDir),
 					Broker:  broker,
 					Logger:  logger,
 				})
@@ -234,7 +240,33 @@ func launcherArgs(spec config.BackendSpec) []string {
 	return args
 }
 
-func backendEnv(spec config.BackendSpec, d config.Defaults) []string {
+// detectShimDir locates the mlx_stack Python package without requiring
+// `pip install -e`. Checked in order:
+//  1. $MLX_STACK_SHIM_DIR env var.
+//  2. Sibling to the binary: <exe-dir>/../share/mlx-stack/python (brew + make install layout).
+//  3. Repo-local: <cwd>/python (dev mode: `./bin/mlxd run` from repo root).
+// Returns "" if nothing found — workers fall back to whatever's on the venv's sys.path.
+func detectShimDir() string {
+	if v := os.Getenv("MLX_STACK_SHIM_DIR"); v != "" {
+		return v
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "..", "share", "mlx-stack", "python")
+		if _, err := os.Stat(filepath.Join(candidate, "mlx_stack", "__init__.py")); err == nil {
+			abs, _ := filepath.Abs(candidate)
+			return abs
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(cwd, "python")
+		if _, err := os.Stat(filepath.Join(candidate, "mlx_stack", "__init__.py")); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func backendEnv(spec config.BackendSpec, d config.Defaults, shimDir string) []string {
 	cache := spec.EffectiveCache(d)
 	wd := spec.EffectiveWatchdog(d)
 	ml := spec.EffectiveMemlog(d)
@@ -259,6 +291,13 @@ func backendEnv(spec config.BackendSpec, d config.Defaults) []string {
 	}
 	if ml.IntervalSec > 0 {
 		env = append(env, fmt.Sprintf("MLX_MEMLOG_INTERVAL_SEC=%d", ml.IntervalSec))
+	}
+	if shimDir != "" {
+		if existing := os.Getenv("PYTHONPATH"); existing != "" {
+			env = append(env, "PYTHONPATH="+shimDir+":"+existing)
+		} else {
+			env = append(env, "PYTHONPATH="+shimDir)
+		}
 	}
 	return env
 }

@@ -10,9 +10,11 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx) framework (via `mlx_lm
 
 (Requires tapping `guygrigsby/mlx-stack` first, or `brew install --HEAD ./Formula/mlx-stack.rb` from a local clone.)
 
-After install, the Python launcher shim must be installed into the venv that has `mlx_lm`:
+mlxd auto-detects the bundled Python shim — no pip install step. You still need a Python with `mlx_lm` installed; if you don't have one, run:
 
-    ~/venvs/mlx/bin/pip install -e "$(brew --prefix mlx-stack)/share/mlx-stack/python"
+    mlxctl bootstrap --path ~/venvs/mlx
+
+That creates a venv and installs `mlx`, `mlx_lm`, `mlx_vlm`, `mlx_embeddings`, `mlx_audio`. Point `python_bin` in `~/.config/mlx/config.toml` at the resulting `.../bin/python`.
 
 ## Build from source
 
@@ -162,6 +164,7 @@ All commands take a backend name. For swap groups, both the group name (`chat`) 
     mlxctl health                 # daemon liveness
     mlxctl config migrate <path>  # convert legacy ~/.config/mlx.conf to TOML
     mlxctl config show            # print current TOML config
+    mlxctl bootstrap [--path P]   # create a venv with mlx_lm + friends (fresh machines)
 
 ## HTTP surface
 

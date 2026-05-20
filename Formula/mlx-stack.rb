@@ -17,13 +17,16 @@ class MlxStack < Formula
 
   def caveats
     <<~EOS
-      mlxd spawns a Python worker that imports mlx_lm / mlx_vlm / mlx_embeddings /
-      mlx_audio. Install the launcher shim into the venv that already has those:
+      mlxd auto-detects the bundled Python shim at #{share}/mlx-stack/python —
+      no pip install needed.
 
-          ~/venvs/mlx/bin/pip install -e "#{share}/mlx-stack/python"
+      It still needs a Python with mlx_lm / mlx_vlm / mlx_embeddings / mlx_audio
+      installed. If you don't already have one:
 
-      A config.toml is required at ~/.config/mlx/config.toml. See the README, or
-      migrate an existing legacy mlx.conf:
+          mlxctl bootstrap --path ~/venvs/mlx
+
+      Then point python_bin at it in ~/.config/mlx/config.toml. To convert a
+      legacy mlx.conf:
 
           mlxctl config migrate ~/.config/mlx.conf > ~/.config/mlx/config.toml
 

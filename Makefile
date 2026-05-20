@@ -21,10 +21,13 @@ test-go:
 test-py:
 	$(PYTHON_BIN) -m pytest python/tests -v
 
+SHIM_DIR ?= $(HOME)/.local/share/mlx-stack/python
+
 install: build
-	mkdir -p $(INSTALL_DIR)
+	mkdir -p $(INSTALL_DIR) $(SHIM_DIR)
 	cp bin/mlxd bin/mlxctl $(INSTALL_DIR)/
-	$(PYTHON_BIN) -m pip install -e ./python
+	rsync -a --delete python/mlx_stack/ $(SHIM_DIR)/mlx_stack/
+	@echo "Installed binaries to $(INSTALL_DIR), Python shim to $(SHIM_DIR)"
 
 clean:
 	rm -rf bin

@@ -41,6 +41,8 @@ func main() {
 		cmdTagsList(os.Args[2:])
 	case "config":
 		cmdConfig(os.Args[2:])
+	case "bootstrap":
+		cmdBootstrap(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -59,11 +61,12 @@ func usage() {
   restart <name>            stop then start
   swap <name>               alias for start
   monitor                   live-refresh status
-  tail [worker]             stream stderr events (optional worker filter)
+  tail [--worker name]      stream stderr events (optional worker filter)
   chat "..."                send a chat request via the router
   tags                      list available models
   health                    daemon liveness
-  config migrate|show`)
+  config migrate|show       config helpers
+  bootstrap [--path P]      create a venv with mlx_lm + friends (fresh machines)`)
 }
 
 func newClient() *ipc.Client {
