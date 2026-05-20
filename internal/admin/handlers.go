@@ -10,6 +10,7 @@ import (
 	"github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
+	"github.com/guygrigsby/mlx-stack/internal/obsstate"
 )
 
 type ChatController interface {
@@ -26,10 +27,11 @@ type TagsController interface {
 }
 
 type Handlers struct {
-	Config *config.Config
-	Chat   ChatController
-	Tags   TagsController
-	Broker *logobs.Broker
+	Config   *config.Config
+	Chat     ChatController
+	Tags     TagsController
+	Broker   *logobs.Broker
+	ObsStore *obsstate.Store
 }
 
 type ChatStatus struct {
@@ -47,8 +49,9 @@ type TagsStatus struct {
 }
 
 type StatusResponse struct {
-	Chat ChatStatus  `json:"chat"`
-	Tags *TagsStatus `json:"tags,omitempty"`
+	Chat    ChatStatus                   `json:"chat"`
+	Tags    *TagsStatus                  `json:"tags,omitempty"`
+	Workers map[string]obsstate.WorkerObs `json:"workers,omitempty"`
 }
 
 type swapReq struct {
@@ -98,6 +101,9 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 			URL:     h.Tags.BaseURL(),
 			Running: h.Tags.Running(),
 		}
+	}
+	if h.ObsStore != nil {
+		resp.Workers = h.ObsStore.Snapshot()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

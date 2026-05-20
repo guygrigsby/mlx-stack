@@ -13,6 +13,7 @@ import (
 	"github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
+	"github.com/guygrigsby/mlx-stack/internal/obsstate"
 )
 
 type fakeChat struct {
@@ -129,6 +130,29 @@ func TestHandler_StatusWithTags(t *testing.T) {
 	}
 	if resp.Tags.Alias != "qwen-tags" || resp.Tags.PID != 12999 || resp.Tags.Running != true {
 		t.Errorf("tags status: %+v", *resp.Tags)
+	}
+}
+
+func TestHandler_StatusIncludesWorkers(t *testing.T) {
+	h := newTestHandlers()
+	store := obsstate.New()
+	store.Apply(logobs.Event{Worker: "chat", Kind: logobs.KindMem, Mem: logobs.MemSnapshot{Active: 1234}})
+	h.ObsStore = store
+
+	mux := h.Mux()
+	req := httptest.NewRequest("GET", "/v1/status", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d", rr.Code)
+	}
+	var resp StatusResponse
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Workers == nil {
+		t.Fatal("workers field missing")
+	}
+	if w, ok := resp.Workers["chat"]; !ok || w.LatestMem == nil || w.LatestMem.Active != 1234 {
+		t.Errorf("worker mem: %+v", w)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/guygrigsby/mlx-stack/internal/admin"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
+	"github.com/guygrigsby/mlx-stack/internal/obsstate"
 	"github.com/guygrigsby/mlx-stack/internal/router"
 	"github.com/guygrigsby/mlx-stack/internal/supervisor"
 )
@@ -43,6 +44,8 @@ func main() {
 	logger.Info("config loaded", "path", *cfgPath, "router_port", cfg.Router.Port, "chat_port", cfg.Chat.Port)
 
 	broker := logobs.NewBroker()
+	obsStore := obsstate.New()
+	go obsStore.Run(context.Background(), broker)
 
 	chatSwap := supervisor.NewChatSwap(supervisor.ChatSwapOpts{
 		Host:           cfg.Chat.Host,
@@ -179,7 +182,7 @@ func main() {
 
 	adminSrv := &admin.Server{
 		SocketPath: *socketPath,
-		Handler:    (&admin.Handlers{Config: cfg, Chat: chatSwap, Tags: tagsMgr, Broker: broker}).Mux(),
+		Handler:    (&admin.Handlers{Config: cfg, Chat: chatSwap, Tags: tagsMgr, Broker: broker, ObsStore: obsStore}).Mux(),
 	}
 
 	if err := adminSrv.Start(); err != nil {
