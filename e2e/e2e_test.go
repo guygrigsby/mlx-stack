@@ -48,20 +48,25 @@ host = "127.0.0.1"
 port = %d
 extra_ports = []
 
-[chat]
-default_profile  = "p1"
-host             = "127.0.0.1"
-port             = %d
-swap_timeout_sec = 5
+[[backend]]
+name    = "p1"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p1"
+default = true
 
-  [chat.profiles.p1]
-  model  = "/tmp/p1"
-  engine = "lm"
-
-  [chat.profiles.p2]
-  model  = "/tmp/p2"
-  engine = "lm"
-`, dir, dir, fakePython, routerPort, chatPort)
+[[backend]]
+name    = "p2"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p2"
+`, dir, dir, fakePython, routerPort, chatPort, chatPort)
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -107,8 +112,8 @@ swap_timeout_sec = 5
 		Data []struct{ ID string } `json:"data"`
 	}
 	json.NewDecoder(resp2.Body).Decode(&list)
-	if len(list.Data) != 2 {
-		t.Errorf("expected 2 models, got %+v", list.Data)
+	if len(list.Data) != 3 {
+		t.Errorf("expected 3 entries (chat group + 2 members), got %+v", list.Data)
 	}
 }
 
@@ -140,20 +145,25 @@ python_bin  = "%s"
 host = "127.0.0.1"
 port = %d
 
-[chat]
-default_profile  = "p1"
-host             = "127.0.0.1"
-port             = %d
-swap_timeout_sec = 5
+[[backend]]
+name    = "p1"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p1"
+default = true
 
-  [chat.profiles.p1]
-  model  = "/tmp/p1"
-  engine = "lm"
-
-  [chat.profiles.p2]
-  model  = "/tmp/p2"
-  engine = "lm"
-`, dir, dir, fakePython, routerPort, chatPort)
+[[backend]]
+name    = "p2"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p2"
+`, dir, dir, fakePython, routerPort, chatPort, chatPort)
 	os.WriteFile(cfgPath, []byte(cfg), 0o644)
 
 	mlxd := exec.Command(filepath.Join(root, "bin", "mlxd"), "run",
@@ -262,22 +272,23 @@ host = "127.0.0.1"
 port = %d
 extra_ports = []
 
-[chat]
-default_profile  = "p1"
-host             = "127.0.0.1"
-port             = %d
-swap_timeout_sec = 5
+[[backend]]
+name    = "p1"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p1"
+default = true
 
-  [chat.profiles.p1]
-  model  = "/tmp/p1"
-  engine = "lm"
-
-[tags]
+[[backend]]
+name   = "qwen-tags"
+engine = "vlm"
+mode   = "persistent"
 host   = "127.0.0.1"
 port   = %d
 model  = "/tmp/qwen-tags"
-engine = "vlm"
-alias  = "qwen-tags"
 `, dir, dir, fakePython, routerPort, chatPort, tagsPort)
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
@@ -337,21 +348,23 @@ host = "127.0.0.1"
 port = %d
 extra_ports = []
 
-[chat]
-default_profile  = "p1"
-host             = "127.0.0.1"
-port             = %d
-swap_timeout_sec = 5
-  [chat.profiles.p1]
-  model  = "/tmp/p1"
-  engine = "lm"
-
-[embed]
-managed = true
+[[backend]]
+name    = "p1"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
 host    = "127.0.0.1"
 port    = %d
-model   = "/tmp/embed"
-alias   = "embed"
+model   = "/tmp/p1"
+default = true
+
+[[backend]]
+name   = "embed"
+engine = "embed"
+mode   = "persistent"
+host   = "127.0.0.1"
+port   = %d
+model  = "/tmp/embed"
 `, dir, dir, fakePython, routerPort, chatPort, embedPort)
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
@@ -413,20 +426,22 @@ python_bin  = "%s"
 host = "127.0.0.1"
 port = %d
 
-[chat]
-default_profile  = "p1"
-host             = "127.0.0.1"
-port             = %d
-swap_timeout_sec = 5
-  [chat.profiles.p1]
-  model  = "/tmp/p1"
-  engine = "lm"
+[[backend]]
+name    = "p1"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p1"
+default = true
 
-[tts]
+[[backend]]
+name   = "tts"
+engine = "audio"
+mode   = "persistent"
 host   = "127.0.0.1"
 port   = %d
-engine = "audio"
-alias  = "tts"
 `, dir, dir, fakePython, routerPort, chatPort, ttsPort)
 	os.WriteFile(cfgPath, []byte(cfg), 0o644)
 
@@ -497,19 +512,20 @@ python_bin  = "%s"
 host = "127.0.0.1"
 port = %d
 
-[chat]
-default_profile  = "p1"
-host             = "127.0.0.1"
-port             = %d
-swap_timeout_sec = 5
-  [chat.profiles.p1]
-  model  = "/tmp/p1"
-  engine = "lm"
+[[backend]]
+name    = "p1"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p1"
+default = true
 
-[embed]
-managed = false
-url     = %q
-alias   = "embed"
+[[backend]]
+name = "embed"
+mode = "external"
+url  = %q
 `, dir, dir, fakePython, routerPort, chatPort, extServer.URL)
 	os.WriteFile(cfgPath, []byte(cfg), 0o644)
 
@@ -533,5 +549,106 @@ alias   = "embed"
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestE2E_BackendList(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	root := repoRoot(t)
+	buildAll(t, root)
+
+	dir := t.TempDir()
+	routerPort := freePort(t)
+	chatPort := freePort(t)
+	tagsPort := freePort(t)
+	sockPath := filepath.Join(dir, "admin.sock")
+
+	fakePython := filepath.Join(dir, "fake-python")
+	os.WriteFile(fakePython, []byte(fmt.Sprintf(`#!/bin/sh
+shift 4
+exec "%s/bin/fakemlx" "$@"
+`, root)), 0o755)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := fmt.Sprintf(`
+log_dir     = "%s"
+models_root = "%s"
+python_bin  = "%s"
+
+[router]
+host = "127.0.0.1"
+port = %d
+
+[[backend]]
+name    = "p1"
+engine  = "lm"
+mode    = "swap"
+group   = "chat"
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/p1"
+default = true
+
+[[backend]]
+name   = "qwen-tags"
+engine = "vlm"
+mode   = "persistent"
+host   = "127.0.0.1"
+port   = %d
+model  = "/tmp/qwen-tags"
+`, dir, dir, fakePython, routerPort, chatPort, tagsPort)
+	os.WriteFile(cfgPath, []byte(cfg), 0o644)
+
+	mlxd := exec.Command(filepath.Join(root, "bin", "mlxd"), "run",
+		"--config", cfgPath, "--socket", sockPath, "--log-level", "debug")
+	mlxd.Stdout = os.Stdout
+	mlxd.Stderr = os.Stderr
+	mlxd.Start()
+	defer func() { mlxd.Process.Signal(os.Interrupt); mlxd.Wait() }()
+	waitPort(t, "127.0.0.1", routerPort, 10*time.Second)
+	time.Sleep(500 * time.Millisecond)
+
+	// Hit the admin socket directly.
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "GET /v1/status HTTP/1.1\r\nHost: mlxd\r\nConnection: close\r\n\r\n")
+
+	body, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// crude: find the JSON portion past the headers
+	idx := strings.Index(string(body), "{")
+	if idx < 0 {
+		t.Fatalf("no JSON in response: %s", body)
+	}
+	var resp struct {
+		Backends []struct {
+			Name string `json:"name"`
+			Mode string `json:"mode"`
+		} `json:"backends"`
+	}
+	if err := json.Unmarshal(body[idx:], &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Backends) < 2 {
+		t.Errorf("expected 2+ backends, got %d", len(resp.Backends))
+	}
+	// Verify names present
+	names := map[string]bool{}
+	for _, b := range resp.Backends {
+		names[b.Name] = true
+	}
+	// "chat" is the swap group's primary name; "qwen-tags" is the persistent.
+	if !names["chat"] {
+		t.Errorf("expected chat group, got names: %v", names)
+	}
+	if !names["qwen-tags"] {
+		t.Errorf("expected qwen-tags backend, got names: %v", names)
 	}
 }
