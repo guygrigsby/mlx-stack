@@ -126,6 +126,7 @@ func (w *Worker) wait() {
 	}
 	close(w.events)
 	w.done <- WorkerResult{ExitCode: code, Err: err}
+	close(w.done)
 }
 
 func (w *Worker) Done() <-chan WorkerResult   { return w.done }
