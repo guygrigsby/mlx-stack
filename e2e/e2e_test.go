@@ -228,3 +228,78 @@ func waitPort(t *testing.T, host string, port int, d time.Duration) {
 	}
 	t.Fatalf("port %d not listening within %s", port, d)
 }
+
+func TestE2E_TagsAlias(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	root := repoRoot(t)
+	buildAll(t, root)
+
+	dir := t.TempDir()
+	routerPort := freePort(t)
+	chatPort := freePort(t)
+	tagsPort := freePort(t)
+	sockPath := filepath.Join(dir, "admin.sock")
+
+	fakePython := filepath.Join(dir, "fake-python")
+	if err := os.WriteFile(fakePython, []byte(fmt.Sprintf(`#!/bin/sh
+shift 4
+exec "%s/bin/fakemlx" "$@"
+`, root)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := fmt.Sprintf(`
+log_dir     = "%s"
+models_root = "%s"
+python_bin  = "%s"
+
+[router]
+host = "127.0.0.1"
+port = %d
+extra_ports = []
+
+[chat]
+default_profile  = "p1"
+host             = "127.0.0.1"
+port             = %d
+swap_timeout_sec = 5
+
+  [chat.profiles.p1]
+  model  = "/tmp/p1"
+  engine = "lm"
+
+[tags]
+host   = "127.0.0.1"
+port   = %d
+model  = "/tmp/qwen-tags"
+engine = "vlm"
+alias  = "qwen-tags"
+`, dir, dir, fakePython, routerPort, chatPort, tagsPort)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mlxd := exec.Command(filepath.Join(root, "bin", "mlxd"), "run",
+		"--config", cfgPath,
+		"--socket", sockPath,
+		"--log-level", "debug",
+	)
+	mlxd.Stdout = os.Stdout
+	mlxd.Stderr = os.Stderr
+	if err := mlxd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		mlxd.Process.Signal(os.Interrupt)
+		mlxd.Wait()
+	}()
+
+	waitPort(t, "127.0.0.1", routerPort, 10*time.Second)
+	// tags is async-started; give it a moment to come up before the request.
+	time.Sleep(500 * time.Millisecond)
+
+	do(t, routerPort, `{"model":"qwen-tags","messages":[{"role":"user","content":"hi"}]}`)
+}
