@@ -3,13 +3,41 @@ package config
 import "fmt"
 
 type Config struct {
-	LogDir     string `toml:"log_dir"`
-	ModelsRoot string `toml:"models_root"`
-	PythonBin  string `toml:"python_bin"`
-	Router     Router `toml:"router"`
-	Chat       Chat   `toml:"chat"`
-	Tags       Tags   `toml:"tags"`
-	Embed      Embed  `toml:"embed"`
+	LogDir     string        `toml:"log_dir"`
+	ModelsRoot string        `toml:"models_root"`
+	PythonBin  string        `toml:"python_bin"`
+	Router     Router        `toml:"router"`
+	Chat       Chat          `toml:"chat"`
+	Tags       Tags          `toml:"tags"`
+	Embed      Embed         `toml:"embed"`
+	TTS        AudioInstance `toml:"tts"`
+	Kokoro     AudioInstance `toml:"kokoro"`
+}
+
+type AudioInstance struct {
+	Host   string   `toml:"host"`
+	Port   int      `toml:"port"`
+	Engine string   `toml:"engine"` // must be "audio" (validated)
+	Models []string `toml:"models"` // optional: model paths to eagerly preload (Phase 4.5)
+	Alias  string   `toml:"alias"`
+	Cache  Cache    `toml:"cache"`
+	Memlog Memlog   `toml:"memlog"`
+}
+
+func (a AudioInstance) Validate(name string) error {
+	if a.Alias == "" && a.Port == 0 && len(a.Models) == 0 {
+		return nil // not configured
+	}
+	if a.Port <= 0 || a.Port > 65535 {
+		return fmt.Errorf("%s.port: must be 1..65535, got %d", name, a.Port)
+	}
+	if a.Engine != "" && a.Engine != "audio" {
+		return fmt.Errorf("%s.engine: must be 'audio', got %q", name, a.Engine)
+	}
+	if a.Alias == "" {
+		return fmt.Errorf("%s.alias: required when %s configured", name, name)
+	}
+	return nil
 }
 
 type Embed struct {
@@ -131,6 +159,12 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("embed.url: required when embed external (managed=false)")
 			}
 		}
+	}
+	if err := c.TTS.Validate("tts"); err != nil {
+		return err
+	}
+	if err := c.Kokoro.Validate("kokoro"); err != nil {
+		return err
 	}
 	return nil
 }

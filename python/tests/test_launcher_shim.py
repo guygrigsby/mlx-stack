@@ -105,3 +105,40 @@ def test_main_embed_calls_embed_server_main(monkeypatch):
     launcher_shim.main(["--engine", "embed", "--model", "/m/embed", "--port", "1236", "--host", "127.0.0.1"])
 
     assert called == {"host": "127.0.0.1", "port": 1236, "model_path": "/m/embed"}
+
+
+def test_parse_args_accepts_audio_engine_no_model():
+    from mlx_stack import launcher_shim
+    args = launcher_shim.parse_args(["--engine", "audio", "--port", "1237"])
+    assert args.engine == "audio"
+    assert args.port == 1237
+    assert args.model == ""
+
+
+def test_parse_args_lm_still_requires_model():
+    from mlx_stack import launcher_shim
+    import pytest as _pytest
+    with _pytest.raises(SystemExit):
+        launcher_shim.parse_args(["--engine", "lm", "--port", "1234"])
+
+
+def test_main_audio_calls_mlx_audio_server(monkeypatch):
+    import sys
+    import types
+
+    called = {}
+
+    fake_audio = types.ModuleType("mlx_audio.server")
+    def fake_main():
+        called["argv"] = list(sys.argv)
+    fake_audio.main = fake_main
+
+    monkeypatch.setitem(sys.modules, "mlx_audio", types.ModuleType("mlx_audio"))
+    monkeypatch.setitem(sys.modules, "mlx_audio.server", fake_audio)
+
+    from mlx_stack import launcher_shim
+    launcher_shim.main(["--engine", "audio", "--port", "1237", "--host", "127.0.0.1"])
+
+    assert "argv" in called
+    assert "--host" in called["argv"] and "127.0.0.1" in called["argv"]
+    assert "--port" in called["argv"] and "1237" in called["argv"]

@@ -33,6 +33,12 @@ func Load(path string) (*Config, error) {
 		prof.Draft = expandHome(prof.Draft)
 		c.Chat.Profiles[name] = prof
 	}
+	for i, m := range c.TTS.Models {
+		c.TTS.Models[i] = expandHome(m)
+	}
+	for i, m := range c.Kokoro.Models {
+		c.Kokoro.Models[i] = expandHome(m)
+	}
 
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)

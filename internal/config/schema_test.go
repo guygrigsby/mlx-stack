@@ -216,3 +216,51 @@ func minChat() Chat {
 		Profiles:       map[string]Profile{"p1": {Model: "/tmp", Engine: "lm"}},
 	}
 }
+
+func TestValidate_AudioTTSOK(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		TTS:       AudioInstance{Host: "127.0.0.1", Port: 1237, Engine: "audio", Alias: "tts"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_AudioKokoroOK(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		Kokoro:    AudioInstance{Host: "127.0.0.1", Port: 8880, Engine: "audio", Alias: "kokoro"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestValidate_AudioZeroValueOK(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("audio zero-value must validate: %v", err)
+	}
+}
+
+func TestValidate_AudioBadEngine(t *testing.T) {
+	c := &Config{
+		PythonBin: "/usr/bin/python",
+		Router:    Router{Host: "127.0.0.1", Port: 1231},
+		Chat:      minChat(),
+		TTS:       AudioInstance{Host: "127.0.0.1", Port: 1237, Engine: "lm", Alias: "tts"},
+	}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "tts.engine") {
+		t.Fatalf("want tts.engine error: %v", err)
+	}
+}

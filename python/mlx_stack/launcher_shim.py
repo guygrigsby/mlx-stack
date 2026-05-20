@@ -18,12 +18,15 @@ os.environ.setdefault("MLX_DISABLE_COMPILE", "1")
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="mlx_stack.launcher_shim")
-    p.add_argument("--engine", required=True, choices=["lm", "vlm", "embed"])
-    p.add_argument("--model", required=True)
+    p.add_argument("--engine", required=True, choices=["lm", "vlm", "embed", "audio"])
+    p.add_argument("--model", default="")
     p.add_argument("--draft-model", default="", dest="draft_model")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", required=True, type=int)
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.engine in ("lm", "vlm", "embed") and not args.model:
+        p.error("--model is required for --engine " + args.engine)
+    return args
 
 
 def build_server_argv(args) -> list[str]:
@@ -54,6 +57,14 @@ def _env_float(name: str, default: float = 0.0) -> float:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    if args.engine == "audio":
+        print(f"[mlx-launch] starting engine=audio host={args.host} port={args.port}", file=sys.stderr, flush=True)
+        # mlx_audio.server is multi-model and loads on demand. Just hand off.
+        import mlx_audio.server as audio_server
+        sys.argv = ["mlx_audio.server", "--host", args.host, "--port", str(args.port)]
+        audio_server.main()
+        return 0
 
     if args.engine == "embed":
         from mlx_stack.embed_server.app import main as embed_main
