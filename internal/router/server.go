@@ -45,8 +45,9 @@ func NewServer(opts ServerOpts) *Server {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
-	mux.HandleFunc("POST /v1/completions", s.handleChat)
+	mux.HandleFunc("POST /v1/chat/completions", s.handleProxyByModel)
+	mux.HandleFunc("POST /v1/completions", s.handleProxyByModel)
+	mux.HandleFunc("POST /v1/embeddings", s.handleProxyByModel)
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	return mux
@@ -61,7 +62,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s.catalog.OpenAIResponse())
 }
 
-func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleProxyByModel(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), 400)

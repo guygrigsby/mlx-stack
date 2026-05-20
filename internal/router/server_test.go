@@ -83,6 +83,36 @@ func TestServer_UnknownModelReturns400(t *testing.T) {
 	}
 }
 
+func TestServer_EmbeddingsRoute(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"model":"/abs/embed"`) {
+			t.Errorf("body: %s", body)
+		}
+		w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Chat:  config.Chat{Profiles: map[string]config.Profile{"v": {Model: "/m", Engine: "lm"}}},
+		Embed: config.Embed{Alias: "embed", URL: upstream.URL},
+	}
+	embed := &fakeManaged{alias: "embed", url: upstream.URL, upstream: "/abs/embed", running: true}
+	srv := NewServer(ServerOpts{
+		Config:   cfg,
+		Chat:     &fakeSwap{},
+		Registry: NewRegistry(cfg, &fakeSwap{}, embed),
+	})
+
+	req := httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(`{"model":"embed","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestServer_ManagedAliasRoutes(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

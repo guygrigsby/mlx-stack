@@ -93,9 +93,46 @@ func main() {
 		}
 	}
 
+	var embedBackend router.ManagedBackend
+	if cfg.Embed.Alias != "" {
+		if cfg.Embed.Managed {
+			em := supervisor.NewManaged(supervisor.ManagedOpts{
+				Name:          "embed",
+				Host:          cfg.Embed.Host,
+				Port:          cfg.Embed.Port,
+				Alias:         cfg.Embed.Alias,
+				UpstreamModel: cfg.Embed.Model,
+				Args: []string{
+					"-m", "mlx_stack.launcher_shim",
+					"--engine", "embed",
+					"--model", cfg.Embed.Model,
+					"--host", cfg.Embed.Host,
+					"--port", fmt.Sprintf("%d", cfg.Embed.Port),
+				},
+				WorkerFactory: func(args []string) *supervisor.Worker {
+					return supervisor.New(supervisor.WorkerSpec{
+						Name: "embed", Command: cfg.PythonBin, Args: args, Logger: logger,
+					})
+				},
+			})
+			if err := em.Start(context.Background()); err != nil {
+				logger.Error("embed start failed", "err", err)
+			} else {
+				logger.Info("embed backend up", "alias", cfg.Embed.Alias, "url", em.URL())
+				embedBackend = em
+			}
+		} else {
+			embedBackend = supervisor.NewExternalAdapter(cfg.Embed.Alias, cfg.Embed.URL, cfg.Embed.Alias)
+			logger.Info("embed backend (external)", "alias", cfg.Embed.Alias, "url", cfg.Embed.URL)
+		}
+	}
+
 	var managedBackends []router.ManagedBackend
 	if tagsMgr != nil {
 		managedBackends = append(managedBackends, tagsMgr)
+	}
+	if embedBackend != nil {
+		managedBackends = append(managedBackends, embedBackend)
 	}
 	registry := router.NewRegistry(cfg, chatSwap, managedBackends...)
 	routerSrv := router.NewServer(router.ServerOpts{
@@ -134,6 +171,9 @@ func main() {
 	logger.Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if em, ok := embedBackend.(*supervisor.Managed); ok {
+		_ = em.Stop(ctx)
+	}
 	if tagsMgr != nil {
 		_ = tagsMgr.Stop(ctx)
 	}
