@@ -1,19 +1,31 @@
 package supervisor
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
-func TestExternalAdapter(t *testing.T) {
-	a := NewExternalAdapter("embed", "http://other:1236", "/m/embed")
-	if a.Alias() != "embed" {
-		t.Errorf("alias: %q", a.Alias())
+func TestExternal(t *testing.T) {
+	e := NewExternal("embed", "http://other:1236", "/m/embed")
+	if e.Name() != "embed" || e.Mode() != "external" {
+		t.Errorf("name/mode: %q %q", e.Name(), e.Mode())
 	}
-	if a.BaseURL() != "http://other:1236" {
-		t.Errorf("url: %q", a.BaseURL())
+	if e.BaseURL() != "http://other:1236" {
+		t.Errorf("url: %q", e.BaseURL())
 	}
-	if a.UpstreamModel() != "/m/embed" {
-		t.Errorf("upstream: %q", a.UpstreamModel())
+	if e.UpstreamModel() != "/m/embed" {
+		t.Errorf("upstream: %q", e.UpstreamModel())
 	}
-	if !a.Running() {
-		t.Errorf("Running() should be true")
+	if !e.Running() {
+		t.Errorf("Running should be true")
+	}
+	if err := e.EnsureLoaded(context.Background(), "embed"); err != nil {
+		t.Errorf("EnsureLoaded: %v", err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Errorf("Start: %v", err)
+	}
+	if err := e.Stop(context.Background()); err != nil {
+		t.Errorf("Stop: %v", err)
 	}
 }

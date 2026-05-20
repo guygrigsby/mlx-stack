@@ -1,25 +1,31 @@
 package supervisor
 
-import "github.com/guygrigsby/mlx-stack/internal/backend"
+import "context"
 
-// ExternalAdapter wraps *backend.External so it satisfies router.ManagedBackend.
-// External backends have a fixed URL and upstream model; we always report
-// Running()=true (Phase 3 doesn't health-probe externals yet).
-type ExternalAdapter struct {
-	*backend.External
+// External is a Backend impl for a URL-only proxy target. No process owned.
+type External struct {
+	NameValue          string
+	URLValue           string
+	UpstreamModelValue string
 }
 
-func NewExternalAdapter(alias, baseURL, upstreamName string) *ExternalAdapter {
-	return &ExternalAdapter{
-		External: &backend.External{
-			AliasName:    alias,
-			BaseURL:      baseURL,
-			UpstreamName: upstreamName,
-		},
+func NewExternal(name, url, upstreamModel string) *External {
+	return &External{
+		NameValue:          name,
+		URLValue:           url,
+		UpstreamModelValue: upstreamModel,
 	}
 }
 
-func (e *ExternalAdapter) Alias() string         { return e.External.AliasName }
-func (e *ExternalAdapter) BaseURL() string       { return e.External.BaseURL }
-func (e *ExternalAdapter) UpstreamModel() string { return e.External.UpstreamName }
-func (e *ExternalAdapter) Running() bool         { return true }
+func (e *External) Name() string          { return e.NameValue }
+func (e *External) Group() string         { return e.NameValue }
+func (e *External) Mode() string          { return "external" }
+func (e *External) Engine() string        { return "" }
+func (e *External) BaseURL() string       { return e.URLValue }
+func (e *External) UpstreamModel() string { return e.UpstreamModelValue }
+func (e *External) Running() bool         { return true }
+func (e *External) PID() int              { return 0 }
+
+func (e *External) EnsureLoaded(_ context.Context, _ string) error { return nil }
+func (e *External) Start(_ context.Context) error                  { return nil }
+func (e *External) Stop(_ context.Context) error                   { return nil }

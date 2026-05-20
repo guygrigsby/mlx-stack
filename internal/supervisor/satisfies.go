@@ -1,14 +1,11 @@
 package supervisor
 
 import (
-	"github.com/guygrigsby/mlx-stack/internal/admin"
-	"github.com/guygrigsby/mlx-stack/internal/router"
+	"github.com/guygrigsby/mlx-stack/internal/backend"
 )
 
 var (
-	_ router.ChatSwapper    = (*ChatSwap)(nil)
-	_ admin.ChatController  = (*ChatSwap)(nil)
-	_ router.ManagedBackend = (*Managed)(nil)
-	_ admin.TagsController  = (*Managed)(nil)
-	_ router.ManagedBackend = (*ExternalAdapter)(nil)
+	_ backend.Backend = (*Group)(nil)
+	_ backend.Backend = (*Persistent)(nil)
+	_ backend.Backend = (*External)(nil)
 )
