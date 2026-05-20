@@ -59,6 +59,19 @@ func main() {
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	})
+	mux.HandleFunc("POST /v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = body // fakemlx is content-agnostic
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data": []map[string]any{
+				{"object": "embedding", "embedding": []float64{0.1, 0.2, 0.3}, "index": 0},
+			},
+			"model": *model,
+			"usage": map[string]int{"prompt_tokens": 3, "total_tokens": 3},
+		})
+	})
 
 	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", *host, *port), Handler: mux}
 

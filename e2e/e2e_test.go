@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -302,4 +303,161 @@ alias  = "qwen-tags"
 	time.Sleep(500 * time.Millisecond)
 
 	do(t, routerPort, `{"model":"qwen-tags","messages":[{"role":"user","content":"hi"}]}`)
+}
+
+func TestE2E_EmbedManaged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	root := repoRoot(t)
+	buildAll(t, root)
+
+	dir := t.TempDir()
+	routerPort := freePort(t)
+	chatPort := freePort(t)
+	embedPort := freePort(t)
+	sockPath := filepath.Join(dir, "admin.sock")
+
+	fakePython := filepath.Join(dir, "fake-python")
+	if err := os.WriteFile(fakePython, []byte(fmt.Sprintf(`#!/bin/sh
+shift 4
+exec "%s/bin/fakemlx" "$@"
+`, root)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := fmt.Sprintf(`
+log_dir     = "%s"
+models_root = "%s"
+python_bin  = "%s"
+
+[router]
+host = "127.0.0.1"
+port = %d
+extra_ports = []
+
+[chat]
+default_profile  = "p1"
+host             = "127.0.0.1"
+port             = %d
+swap_timeout_sec = 5
+  [chat.profiles.p1]
+  model  = "/tmp/p1"
+  engine = "lm"
+
+[embed]
+managed = true
+host    = "127.0.0.1"
+port    = %d
+model   = "/tmp/embed"
+alias   = "embed"
+`, dir, dir, fakePython, routerPort, chatPort, embedPort)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mlxd := exec.Command(filepath.Join(root, "bin", "mlxd"), "run",
+		"--config", cfgPath, "--socket", sockPath, "--log-level", "debug")
+	mlxd.Stdout = os.Stdout
+	mlxd.Stderr = os.Stderr
+	if err := mlxd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { mlxd.Process.Signal(os.Interrupt); mlxd.Wait() }()
+
+	waitPort(t, "127.0.0.1", routerPort, 10*time.Second)
+	time.Sleep(500 * time.Millisecond)
+
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/v1/embeddings", routerPort),
+		"application/json",
+		strings.NewReader(`{"model":"embed","input":"hello"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestE2E_EmbedExternal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	root := repoRoot(t)
+	buildAll(t, root)
+
+	// Spin up a captive httptest server playing the role of an external embed.
+	extServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/embeddings" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[{"embedding":[0.5],"index":0}],"model":"ext","usage":{"prompt_tokens":1,"total_tokens":1}}`))
+	}))
+	defer extServer.Close()
+
+	dir := t.TempDir()
+	routerPort := freePort(t)
+	chatPort := freePort(t)
+	sockPath := filepath.Join(dir, "admin.sock")
+
+	fakePython := filepath.Join(dir, "fake-python")
+	os.WriteFile(fakePython, []byte(fmt.Sprintf(`#!/bin/sh
+shift 4
+exec "%s/bin/fakemlx" "$@"
+`, root)), 0o755)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := fmt.Sprintf(`
+log_dir     = "%s"
+models_root = "%s"
+python_bin  = "%s"
+
+[router]
+host = "127.0.0.1"
+port = %d
+
+[chat]
+default_profile  = "p1"
+host             = "127.0.0.1"
+port             = %d
+swap_timeout_sec = 5
+  [chat.profiles.p1]
+  model  = "/tmp/p1"
+  engine = "lm"
+
+[embed]
+managed = false
+url     = %q
+alias   = "embed"
+`, dir, dir, fakePython, routerPort, chatPort, extServer.URL)
+	os.WriteFile(cfgPath, []byte(cfg), 0o644)
+
+	mlxd := exec.Command(filepath.Join(root, "bin", "mlxd"), "run",
+		"--config", cfgPath, "--socket", sockPath, "--log-level", "debug")
+	mlxd.Stdout = os.Stdout
+	mlxd.Stderr = os.Stderr
+	mlxd.Start()
+	defer func() { mlxd.Process.Signal(os.Interrupt); mlxd.Wait() }()
+	waitPort(t, "127.0.0.1", routerPort, 5*time.Second)
+
+	resp, err := http.Post(
+		fmt.Sprintf("http://127.0.0.1:%d/v1/embeddings", routerPort),
+		"application/json",
+		strings.NewReader(`{"model":"embed","input":"world"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, b)
+	}
 }
