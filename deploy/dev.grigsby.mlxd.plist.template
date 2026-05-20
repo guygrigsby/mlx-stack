@@ -12,6 +12,8 @@
     <string>--config</string>
     <string>{{HOME}}/.config/mlx/config.toml</string>
     <string>--log-json</string>
+    <string>--log-dir</string>
+    <string>{{HOME}}/.logs/mlx</string>
   </array>
 
   <key>RunAtLoad</key>

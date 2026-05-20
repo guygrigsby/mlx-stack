@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/guygrigsby/mlx-stack/internal/admin"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
+	"github.com/guygrigsby/mlx-stack/internal/logrot"
 	"github.com/guygrigsby/mlx-stack/internal/obsstate"
 	"github.com/guygrigsby/mlx-stack/internal/router"
 	"github.com/guygrigsby/mlx-stack/internal/supervisor"
@@ -22,7 +24,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: mlxd run [--config path] [--socket path] [--log-level lvl] [--log-json]")
+		fmt.Fprintln(os.Stderr, "usage: mlxd run [--config path] [--socket path] [--log-level lvl] [--log-json] [--log-dir dir]")
 		os.Exit(2)
 	}
 
@@ -31,9 +33,15 @@ func main() {
 	socketPath := cmdRun.String("socket", defaultSocketPath(), "admin unix socket path")
 	logLevel := cmdRun.String("log-level", "info", "debug|info|warn|error")
 	logJSON := cmdRun.Bool("log-json", false, "emit logs as JSON")
+	logDir := cmdRun.String("log-dir", "", "directory for rotating mlxd-YYYY-MM-DD.log files")
 	cmdRun.Parse(os.Args[2:])
 
-	logger := setupLogger(*logLevel, *logJSON)
+	logger, rotator := setupLogger(*logLevel, *logJSON, *logDir)
+	defer func() {
+		if rotator != nil {
+			rotator.Close()
+		}
+	}()
 	slog.SetDefault(logger)
 
 	cfg, err := config.Load(*cfgPath)
@@ -300,7 +308,7 @@ func buildAudioManaged(name string, ai config.AudioInstance, pythonBin string, l
 	})
 }
 
-func setupLogger(level string, jsonOut bool) *slog.Logger {
+func setupLogger(level string, jsonOut bool, logDir string) (*slog.Logger, *logrot.Rotator) {
 	lvl := slog.LevelInfo
 	switch level {
 	case "debug":
@@ -311,13 +319,21 @@ func setupLogger(level string, jsonOut bool) *slog.Logger {
 		lvl = slog.LevelError
 	}
 	opts := &slog.HandlerOptions{Level: lvl}
+
+	var out io.Writer = os.Stderr
+	var rotator *logrot.Rotator
+	if logDir != "" {
+		rotator = logrot.New(logDir, "mlxd")
+		out = rotator
+	}
+
 	var h slog.Handler
 	if jsonOut {
-		h = slog.NewJSONHandler(os.Stderr, opts)
+		h = slog.NewJSONHandler(out, opts)
 	} else {
-		h = slog.NewTextHandler(os.Stderr, opts)
+		h = slog.NewTextHandler(out, opts)
 	}
-	return slog.New(h)
+	return slog.New(h), rotator
 }
 
 func defaultConfigPath() string {
