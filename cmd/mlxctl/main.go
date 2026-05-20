@@ -38,6 +38,8 @@ func main() {
 		cmdChat(os.Args[2:])
 	case "tags":
 		cmdTagsList(os.Args[2:])
+	case "config":
+		cmdConfig(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -58,7 +60,9 @@ func usage() {
   restart chat                 restart chat backend
   chat "..."                   send a chat request via the router
   tags                         list available models
-  health                       daemon liveness check`)
+  health                       daemon liveness check
+  config migrate [src]         migrate ~/.config/mlx.conf to TOML on stdout
+  config show [path]           print config file (--resolved: expand + validate)`)
 }
 
 func newClient() *ipc.Client {
