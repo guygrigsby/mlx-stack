@@ -43,6 +43,10 @@ func main() {
 		cmdConfig(os.Args[2:])
 	case "bootstrap":
 		cmdBootstrap(os.Args[2:])
+	case "add":
+		cmdAdd(os.Args[2:])
+	case "scan":
+		cmdScan(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -66,7 +70,9 @@ func usage() {
   tags                      list available models
   health                    daemon liveness
   config show               print current TOML config
-  bootstrap [--path P]      create a venv with mlx_lm + friends (fresh machines)`)
+  bootstrap [--path P]      create a venv with mlx_lm + friends (fresh machines)
+  add <path-or-hf-repo>     register a backend (downloads HF repos to models_root)
+  scan [<dir>] [--add]      list models under a dir; --add appends missing ones`)
 }
 
 func newClient() *ipc.Client {
