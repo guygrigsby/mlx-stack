@@ -56,6 +56,33 @@ def test_watchdog_triggers_execv_when_above_headroom(monkeypatch, capsys):
     assert execv_calls[0][0] == sys.executable
 
 
+def test_watchdog_uses_restart_argv(monkeypatch):
+    samples = iter([1_000_000_000, 1_000_000_000, 9_500_000_000, 9_500_000_000])
+    fake_mx = types.SimpleNamespace(get_active_memory=lambda: next(samples))
+
+    execv_calls = []
+    monkeypatch.setattr("os.execv", lambda exe, argv: execv_calls.append((exe, list(argv))))
+
+    from mlx_stack.memory import watchdog
+
+    stop = watchdog.start(
+        mx=fake_mx,
+        kv_headroom_bytes=8_000_000_000,
+        check_interval_sec=0.05,
+        grace_sec=0.05,
+        restart_argv=["/usr/bin/python", "-m", "mlx_stack.launcher_shim", "--engine", "lm"],
+    )
+    try:
+        time.sleep(0.5)
+    finally:
+        stop()
+
+    assert len(execv_calls) == 1
+    exe, argv = execv_calls[0]
+    assert exe == "/usr/bin/python"
+    assert argv == ["/usr/bin/python", "-m", "mlx_stack.launcher_shim", "--engine", "lm"]
+
+
 def test_watchdog_stop_is_clean(monkeypatch):
     fake_mx = types.SimpleNamespace(get_active_memory=lambda: 0)
     monkeypatch.setattr("os.execv", lambda *a: None)

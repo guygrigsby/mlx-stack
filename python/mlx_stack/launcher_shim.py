@@ -102,11 +102,16 @@ def main(argv=None) -> int:
     kv_headroom = _env_int("MLX_KV_HEADROOM_BYTES")
     if kv_headroom > 0:
         from mlx_stack.memory import watchdog
+        # Snapshot launcher_shim's own argv before we hand off to the engine
+        # server, so the watchdog can execv us cleanly instead of trying to
+        # re-run the engine's rewritten sys.argv.
+        restart_argv = [sys.executable, "-m", "mlx_stack.launcher_shim", *(argv if argv is not None else sys.argv[1:])]
         stops.append(watchdog.start(
             mx=mx,
             kv_headroom_bytes=kv_headroom,
             check_interval_sec=_env_float("MLX_ACTIVE_MEMORY_CHECK_INTERVAL_SEC", 30.0),
             grace_sec=_env_float("MLX_ACTIVE_MEMORY_GRACE_SEC", 90.0),
+            restart_argv=restart_argv,
         ))
 
     print(f"[mlx-launch] starting engine={args.engine} model={args.model} port={args.port}", file=sys.stderr, flush=True)
