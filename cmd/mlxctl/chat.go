@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -91,9 +92,10 @@ func resolveChatModel() string {
 }
 
 func newChatCmd() *cobra.Command {
-	return &cobra.Command{
+	var noStream bool
+	cmd := &cobra.Command{
 		Use:   "chat \"...\"",
-		Short: "Send a chat request via the router",
+		Short: "Send a chat request via the router (streams by default)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			model := resolveChatModel()
@@ -102,42 +104,92 @@ func newChatCmd() *cobra.Command {
 			}
 
 			msg := strings.Join(args, " ")
-			body, _ := json.Marshal(map[string]any{
+			payload := map[string]any{
 				"model": model,
 				"messages": []map[string]string{
 					{"role": "user", "content": msg},
 				},
 				"max_tokens": 512,
-			})
+				"stream":     !noStream,
+			}
+			body, _ := json.Marshal(payload)
+
 			resp, err := http.Post(routerURL()+"/v1/chat/completions", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return err
 			}
 			defer resp.Body.Close()
-			respBody, _ := io.ReadAll(resp.Body)
 			if resp.StatusCode != 200 {
+				respBody, _ := io.ReadAll(resp.Body)
 				return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
 			}
 
-			var parsed struct {
-				Choices []struct {
-					Message struct {
-						Content string `json:"content"`
-					} `json:"message"`
-				} `json:"choices"`
-			}
-			if err := json.Unmarshal(respBody, &parsed); err != nil {
-				fmt.Println(string(respBody))
+			if noStream {
+				respBody, _ := io.ReadAll(resp.Body)
+				printNonStreamChat(respBody)
 				return nil
 			}
-			if len(parsed.Choices) > 0 {
-				fmt.Println(parsed.Choices[0].Message.Content)
-			} else {
-				fmt.Println(string(respBody))
-			}
-			return nil
+			return streamChatSSE(resp.Body)
 		},
 	}
+	cmd.Flags().BoolVar(&noStream, "no-stream", false, "buffer the full reply instead of streaming tokens")
+	return cmd
+}
+
+func printNonStreamChat(respBody []byte) {
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil || len(parsed.Choices) == 0 {
+		fmt.Println(string(respBody))
+		return
+	}
+	fmt.Println(parsed.Choices[0].Message.Content)
+}
+
+// streamChatSSE reads an OpenAI-style chat-completion SSE stream and prints
+// the assistant content deltas to stdout as they arrive.
+func streamChatSSE(r io.Reader) error {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	any := false
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			if c.Delta.Content != "" {
+				fmt.Print(c.Delta.Content)
+				any = true
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if any {
+		fmt.Println()
+	}
+	return nil
 }
 
 func newTagsCmd() *cobra.Command {
