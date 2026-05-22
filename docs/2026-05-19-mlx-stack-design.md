@@ -1,7 +1,7 @@
 # mlx-stack: design
 
 **Date:** 2026-05-19
-**Status:** draft, awaiting review
+**Status:** historical snapshot. The runtime is now what shipped through phase 8. CLI is `mlxctl`, not `mlx`. The TOML schema is the unified `[[backend]]` array described in `2026-05-19-mlx-stack-phase-8-unified-backends.md`, not the typed `[chat]`/`[tags]`/... shown below. Recent runtime-stability fixes and per-backend samplers are in `2026-05-22-runtime-stability-and-samplers.md`. Use the README for the current quickstart.
 **Author:** Guy
 **Replaces:** `~/scripts/mlx` (zsh), `~/scripts/mlx-router.py`, `~/scripts/mlx-server-launch.py`, `~/scripts/mlx-embed-server.py`, `~/.config/mlx.conf`
 
