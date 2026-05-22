@@ -258,6 +258,9 @@ func launcherArgs(spec config.BackendSpec) []string {
 	if spec.DraftModel != "" {
 		args = append(args, "--draft-model", spec.DraftModel)
 	}
+	if spec.TrustRemoteCode {
+		args = append(args, "--trust-remote-code")
+	}
 	return args
 }
 

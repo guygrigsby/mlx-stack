@@ -23,6 +23,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--draft-model", default="", dest="draft_model")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", required=True, type=int)
+    p.add_argument("--trust-remote-code", action="store_true", dest="trust_remote_code")
     args = p.parse_args(argv)
     if args.engine in ("lm", "vlm", "embed") and not args.model:
         p.error("--model is required for --engine " + args.engine)
@@ -38,6 +39,8 @@ def build_server_argv(args) -> list[str]:
     ]
     if args.draft_model:
         argv += ["--draft-model", args.draft_model]
+    if args.trust_remote_code:
+        argv += ["--trust-remote-code"]
     return argv
 
 

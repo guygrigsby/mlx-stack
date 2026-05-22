@@ -87,14 +87,15 @@ port   = 1234
 model  = "~/mlx-models/scout"
 
 [[backend]]
-name        = "anubis"
-engine      = "lm"
-mode        = "swap"
-group       = "chat"
-host        = "127.0.0.1"
-port        = 1234
-model       = "~/mlx-models/anubis"
-draft_model = "~/mlx-models/anubis-draft"
+name              = "anubis"
+engine            = "lm"
+mode              = "swap"
+group             = "chat"
+host              = "127.0.0.1"
+port              = 1234
+model             = "~/mlx-models/anubis"
+draft_model       = "~/mlx-models/anubis-draft"
+trust_remote_code = true   # required when the model ships custom config/modeling .py files (auto_map in config.json)
 
 # Always-on tags model (VLM).
 [[backend]]

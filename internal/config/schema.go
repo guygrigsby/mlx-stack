@@ -28,20 +28,21 @@ type Defaults struct {
 
 // BackendSpec is one entry in the [[backend]] array-of-tables.
 type BackendSpec struct {
-	Name          string    `toml:"name"`
-	Engine        string    `toml:"engine"`
-	Mode          string    `toml:"mode"`           // "swap" | "persistent" | "external"
-	Group         string    `toml:"group"`          // for swap mode; defaults to Name
-	Default       bool      `toml:"default"`        // for swap members: auto-load on group start
-	Host          string    `toml:"host"`
-	Port          int       `toml:"port"`
-	Model         string    `toml:"model"`
-	DraftModel    string    `toml:"draft_model"`
-	URL           string    `toml:"url"`            // mode=external
-	UpstreamModel string    `toml:"upstream_model"` // mode=external
-	Cache         *Cache    `toml:"cache"`          // optional override
-	Watchdog      *Watchdog `toml:"watchdog"`
-	Memlog        *Memlog   `toml:"memlog"`
+	Name            string    `toml:"name"`
+	Engine          string    `toml:"engine"`
+	Mode            string    `toml:"mode"`              // "swap" | "persistent" | "external"
+	Group           string    `toml:"group"`             // for swap mode; defaults to Name
+	Default         bool      `toml:"default"`           // for swap members: auto-load on group start
+	Host            string    `toml:"host"`
+	Port            int       `toml:"port"`
+	Model           string    `toml:"model"`
+	DraftModel      string    `toml:"draft_model"`
+	URL             string    `toml:"url"`               // mode=external
+	UpstreamModel   string    `toml:"upstream_model"`    // mode=external
+	TrustRemoteCode bool      `toml:"trust_remote_code"` // mlx_lm/mlx_vlm: pass --trust-remote-code
+	Cache           *Cache    `toml:"cache"`             // optional override
+	Watchdog        *Watchdog `toml:"watchdog"`
+	Memlog          *Memlog   `toml:"memlog"`
 }
 
 type Cache struct {
