@@ -1,5 +1,7 @@
 # mlx-stack Phase 6 Implementation Plan — TOML Migration + Port Cutover
 
+> **Status (2026-05-22):** partially shipped, partially reverted. Port cutover (router on 1230 + 8080, legacy scripts moved to `legacy/`) shipped. **The `mlxctl config migrate` command described here was removed** in commit `ab482fc feat: remove config migrate` — `~/.config/mlx.conf` is long gone and migration has no target. The TOML shape the migrator would have produced was itself later replaced by phase 8's `[[backend]]` array. CLI is `mlxctl`. Current schema: phase 8 + README.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 
 **Goal:** Provide a `mlxctl config migrate` command that reads the legacy `~/.config/mlx.conf` shell file and emits an equivalent `~/.config/mlx/config.toml`. Cut router defaults over to ports 1230 + 8080 (matching today's stack). Archive the legacy zsh + Python scripts into `legacy/`.

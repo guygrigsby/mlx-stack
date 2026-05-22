@@ -1,5 +1,7 @@
 # mlx-stack Phase 1 Implementation Plan — Skeleton + Chat Backend
 
+> **Status (2026-05-22):** shipped, then superseded. The CLI was renamed `mlx` → `mlxctl` during phase 5. The typed `[chat]`/`[chat.profiles.*]` schema described below was replaced by the unified `[[backend]]` array in `2026-05-19-mlx-stack-phase-8-unified-backends.md`. Runtime-stability corrections (worker ctx, watchdog argv, group reaper, trust_remote_code, samplers) live in `2026-05-22-runtime-stability-and-samplers.md`. The README is the current quickstart.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the foundational mlxd daemon + mlx CLI with a working chat backend. End of Phase 1: `mlxd` runs on port 1231, spawns the Python launcher shim → `mlx_lm.server`, hot-swaps profiles in-process on a `model`-field request, and serves `/v1/chat/completions` + `/v1/completions` + `/v1/models`. Old zsh stack on port 1230 stays untouched and untested-against.

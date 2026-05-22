@@ -1,5 +1,7 @@
 # mlx-stack Phase 8 Implementation Plan — Unified Backend Schema + CLI
 
+> **Status (2026-05-22):** shipped — this is the current TOML schema. Two later additions per backend: `trust_remote_code: bool` (custom-code models like DeciLM) and `[backend.sampler]` (default sampler for `mlxctl chat`). Runtime-stability corrections (worker request-ctx death, watchdog argv, group reaper) are in `2026-05-22-runtime-stability-and-samplers.md`. `mlxctl config migrate` was later removed; phase 8 entries are now hand-written.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 
 **Goal:** Collapse the typed config (`[chat]` / `[tags]` / `[embed]` / `[tts]` / `[kokoro]`) into a single `[[backend]]` array-of-tables, where each entry is a named model with `engine` and `mode`. CLI becomes uniform: every backend is addressed by name through the same `start|stop|restart|swap|status|monitor|tail` commands.

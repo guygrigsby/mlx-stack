@@ -1,5 +1,7 @@
 # mlx-stack Phase 2 Implementation Plan — Tags Backend (always-on Managed)
 
+> **Status (2026-05-22):** shipped. `Managed` was later renamed `Persistent` in phase 8, and the typed `[tags]` schema described here was replaced by a `mode = "persistent"` entry in the unified `[[backend]]` array. CLI is `mlxctl` (renamed in phase 5). Current schema: see phase 8 + README.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement task-by-task.
 
 **Goal:** Add a second backend class — always-on `Managed` — and wire it up so the `tags` profile (an always-loaded VLM for image tagging) is supervised, restarts on exit with exponential backoff, and routes alongside `chat`.

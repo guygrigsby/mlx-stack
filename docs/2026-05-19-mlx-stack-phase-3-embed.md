@@ -1,5 +1,7 @@
 # mlx-stack Phase 3 Implementation Plan — Embed Backend
 
+> **Status (2026-05-22):** shipped. The typed `[embed]` schema described here was replaced in phase 8 by a unified `[[backend]]` entry (`engine = "embed"`, `mode = "persistent"` or `"external"`). CLI is `mlxctl`. Current schema: see phase 8 + README.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 
 **Goal:** Add an embedding backend with two variants: managed (mlxd spawns a Python `mlx_stack.embed_server` FastAPI app) or external (mlxd just proxies to a fixed URL). Routes `POST /v1/embeddings` through the router.

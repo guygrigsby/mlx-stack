@@ -1,5 +1,7 @@
 # mlx-stack Phase 4 Implementation Plan — Audio (TTS + Kokoro)
 
+> **Status (2026-05-22):** shipped. The typed `[tts]` / `[kokoro]` schema described here was replaced in phase 8 by unified `[[backend]]` entries (`engine = "audio"`, `mode = "persistent"`). CLI is `mlxctl`. Current schema: see phase 8 + README.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 
 **Goal:** Spawn two managed audio backends — `tts` and `kokoro` — each running `mlx_audio.server` on its own port. Route `POST /v1/audio/*` through the router.

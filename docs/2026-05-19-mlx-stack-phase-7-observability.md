@@ -1,5 +1,7 @@
 # mlx-stack Phase 7 Implementation Plan — Observability Polish
 
+> **Status (2026-05-22):** shipped. Status table, monitor, and tail are wired to `obsstate` + `logobs`. CLI subsequently moved to spf13/cobra; the subcommand wiring shown below no longer matches the code, but the behavior is preserved.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 
 **Goal:** Make `mlxctl status` and `mlxctl monitor` actually useful: pretty table, latest mem snapshot per worker, latest request timing, exit history. Add daily log rotation in mlxd.

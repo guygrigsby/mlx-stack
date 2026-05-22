@@ -1,5 +1,7 @@
 # mlx-stack Phase 5 Implementation Plan — CLI Parity
 
+> **Status (2026-05-22):** shipped, then re-shaped. mlxctl was later ported to spf13/cobra (commit `2e5c456`), so the hand-rolled subcommand dispatch in this plan no longer matches the code. The chat command was also rewritten — see `2026-05-22-runtime-stability-and-samplers.md` for the current shape (SSE streaming, per-backend samplers, config-driven router URL). `mlxctl add` / `scan` / `bootstrap` were added later. Current CLI surface: README + `mlxctl --help`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 
 **Goal:** Replace remaining zsh helpers with `mlxctl` subcommands: `monitor`, `tail`, `chat`, `tag`, `tags`. Ship a launchd plist template.
