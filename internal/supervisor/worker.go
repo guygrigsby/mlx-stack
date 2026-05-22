@@ -55,7 +55,13 @@ func New(spec WorkerSpec) *Worker {
 func (w *Worker) Start(ctx context.Context) error {
 	var startErr error
 	w.startOnce.Do(func() {
-		cmd := exec.CommandContext(ctx, w.spec.Command, w.spec.Args...)
+		// Intentionally NOT exec.CommandContext(ctx, ...). ctx here is the
+		// caller's (often an HTTP request) context — binding the worker's
+		// lifetime to it would SIGKILL the model server the moment the
+		// request that started it completes. Worker lifetime is managed
+		// explicitly via Signal / Stop / the group reaper.
+		_ = ctx
+		cmd := exec.Command(w.spec.Command, w.spec.Args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Env = append(cmd.Environ(), w.spec.Env...)
 

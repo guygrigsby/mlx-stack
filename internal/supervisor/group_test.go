@@ -131,6 +131,112 @@ func TestGroup_Start(t *testing.T) {
 	}
 }
 
+func TestGroup_WorkerSurvivesCallerCtxCancel(t *testing.T) {
+	// Regression: previously, exec.CommandContext bound the worker's
+	// lifetime to the EnsureLoaded ctx (typically an HTTP request ctx),
+	// so the moment the triggering request finished, the model server was
+	// SIGKILLed and the next request hit a refused port.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := map[string]config.BackendSpec{
+		"p1": {Name: "p1", Mode: "swap", Group: "chat", Engine: "lm", Model: "/tmp/p1", Host: "127.0.0.1", Port: 0},
+	}
+	g := NewGroup(GroupOpts{
+		Name:           "chat",
+		Host:           "127.0.0.1",
+		Port:           port,
+		Members:        members,
+		SwapTimeoutSec: 5,
+		ProbeInterval:  20 * time.Millisecond,
+		WorkerFactory: func(spec config.BackendSpec) *Worker {
+			return New(WorkerSpec{Name: "chat[" + spec.Name + "]", Command: "/bin/sh", Args: []string{"-c", "sleep 2"}})
+		},
+	})
+	g.upstreamURLOverride = upstream.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := g.EnsureLoaded(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	cancel() // simulate the HTTP request that triggered the load ending
+
+	// Give the runtime a moment to potentially kill the process.
+	time.Sleep(150 * time.Millisecond)
+
+	if g.Current() != "p1" {
+		t.Fatalf("worker died after caller ctx cancel: current=%q", g.Current())
+	}
+	if !g.Running() {
+		t.Fatalf("worker died after caller ctx cancel: Running()=false")
+	}
+}
+
+func TestGroup_WorkerExitClearsState(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started int32
+	members := map[string]config.BackendSpec{
+		"p1": {Name: "p1", Mode: "swap", Group: "chat", Engine: "lm", Model: "/tmp/p1", Host: "127.0.0.1", Port: 0},
+	}
+	g := NewGroup(GroupOpts{
+		Name:           "chat",
+		Host:           "127.0.0.1",
+		Port:           port,
+		Members:        members,
+		DefaultMember:  "p1",
+		SwapTimeoutSec: 5,
+		ProbeInterval:  20 * time.Millisecond,
+		WorkerFactory: func(spec config.BackendSpec) *Worker {
+			atomic.AddInt32(&started, 1)
+			// Sleeps briefly then exits, simulating a worker that dies.
+			return New(WorkerSpec{Name: "chat[" + spec.Name + "]", Command: "/bin/sh", Args: []string{"-c", "sleep 0.2"}})
+		},
+	})
+	g.upstreamURLOverride = upstream.URL
+
+	if err := g.EnsureLoaded(context.Background(), "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if g.Current() != "p1" {
+		t.Fatalf("current after first load: %q", g.Current())
+	}
+
+	// Wait for the worker to exit; reaper goroutine should clear state.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if g.Current() == "" && !g.Running() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if g.Current() != "" {
+		t.Fatalf("state not cleared after worker exit: current=%q", g.Current())
+	}
+
+	if err := g.EnsureLoaded(context.Background(), "p1"); err != nil {
+		t.Fatalf("second load after death: %v", err)
+	}
+	if atomic.LoadInt32(&started) != 2 {
+		t.Errorf("want 2 spawns after worker death, got %d", started)
+	}
+}
+
 func TestGroup_Stop(t *testing.T) {
 	g, _ := newTestGroup(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

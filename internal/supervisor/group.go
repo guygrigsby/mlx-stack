@@ -155,7 +155,26 @@ func (g *Group) EnsureLoaded(ctx context.Context, name string) error {
 
 	g.current = name
 	g.state.Current = name
+	g.watchExit(w)
 	return nil
+}
+
+// watchExit clears the group's loaded state when the worker process exits,
+// so the next EnsureLoaded call respawns instead of returning a stale
+// "already loaded" and proxying to a dead port.
+func (g *Group) watchExit(w *Worker) {
+	go func() {
+		<-w.Done()
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.worker == w {
+			g.worker = nil
+			g.current = ""
+			g.state.Current = ""
+			g.state.WorkerPID = 0
+			g.state.WorkerURL = ""
+		}
+	}()
 }
 
 func (g *Group) probeReady(ctx context.Context) error {
