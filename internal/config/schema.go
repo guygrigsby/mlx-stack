@@ -40,9 +40,22 @@ type BackendSpec struct {
 	URL             string    `toml:"url"`               // mode=external
 	UpstreamModel   string    `toml:"upstream_model"`    // mode=external
 	TrustRemoteCode bool      `toml:"trust_remote_code"` // mlx_lm/mlx_vlm: pass --trust-remote-code
+	Sampler         *Sampler  `toml:"sampler"`           // default sampler params for chat-style requests
 	Cache           *Cache    `toml:"cache"`             // optional override
 	Watchdog        *Watchdog `toml:"watchdog"`
 	Memlog          *Memlog   `toml:"memlog"`
+}
+
+// Sampler holds default generation parameters mlxctl chat sends with each
+// request. mlx_lm.server treats them as request-body overrides over its CLI
+// defaults. Zero values are omitted from the request.
+type Sampler struct {
+	Temperature       float64 `toml:"temperature"`
+	TopP              float64 `toml:"top_p"`
+	TopK              int     `toml:"top_k"`
+	MinP              float64 `toml:"min_p"`
+	RepetitionPenalty float64 `toml:"repetition_penalty"`
+	MaxTokens         int     `toml:"max_tokens"`
 }
 
 type Cache struct {

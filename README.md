@@ -96,6 +96,10 @@ port              = 1234
 model             = "~/mlx-models/anubis"
 draft_model       = "~/mlx-models/anubis-draft"
 trust_remote_code = true   # required when the model ships custom config/modeling .py files (auto_map in config.json)
+  [backend.sampler]        # sent with every mlxctl chat request to this backend; mlx_lm.server respects min_p / top_k / repetition_penalty
+  temperature        = 1.1
+  min_p              = 0.075
+  repetition_penalty = 1.05
 
 # Always-on tags model (VLM).
 [[backend]]

@@ -91,6 +91,46 @@ func resolveChatModel() string {
 	return firstLM
 }
 
+// samplerFor returns the configured sampler for the given backend name, or
+// nil if no override exists.
+func samplerFor(name string) *config.Sampler {
+	c := loadCfg()
+	if c == nil {
+		return nil
+	}
+	for _, b := range c.Backends {
+		if b.Name == name && b.Sampler != nil {
+			return b.Sampler
+		}
+	}
+	return nil
+}
+
+// applySampler merges non-zero sampler params into the request payload.
+func applySampler(payload map[string]any, s *config.Sampler) {
+	if s == nil {
+		return
+	}
+	if s.Temperature != 0 {
+		payload["temperature"] = s.Temperature
+	}
+	if s.TopP != 0 {
+		payload["top_p"] = s.TopP
+	}
+	if s.TopK != 0 {
+		payload["top_k"] = s.TopK
+	}
+	if s.MinP != 0 {
+		payload["min_p"] = s.MinP
+	}
+	if s.RepetitionPenalty != 0 {
+		payload["repetition_penalty"] = s.RepetitionPenalty
+	}
+	if s.MaxTokens != 0 {
+		payload["max_tokens"] = s.MaxTokens
+	}
+}
+
 func newChatCmd() *cobra.Command {
 	var noStream bool
 	cmd := &cobra.Command{
@@ -109,8 +149,11 @@ func newChatCmd() *cobra.Command {
 				"messages": []map[string]string{
 					{"role": "user", "content": msg},
 				},
-				"max_tokens": 512,
-				"stream":     !noStream,
+				"stream": !noStream,
+			}
+			applySampler(payload, samplerFor(model))
+			if _, ok := payload["max_tokens"]; !ok {
+				payload["max_tokens"] = 512
 			}
 			body, _ := json.Marshal(payload)
 
