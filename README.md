@@ -145,21 +145,26 @@ upstream_model = "nomic-ai/nomic-embed-text-v1.5"
 
 ## CLI
 
-All commands take a backend name. For swap groups, both the group name (`chat`) and any member name (`valkyrie`, `scout`, `anubis`) resolve to the same group.
+`start` / `stop` / `restart` / `swap` take a **member** name (e.g. `valkyrie`, `scout`, `anubis`) — not a group name. `mlxctl chat` and the router can be addressed by either, and `chat` auto-picks the currently-loaded LM swap member (or the configured `default=true` chat member if nothing is loaded yet).
 
     mlxctl status                 # table of every backend's state
+    mlxctl list                   # alias for status
     mlxctl monitor                # status, refreshed every 500ms
     mlxctl tail                   # stream structured stderr events from all workers
     mlxctl tail --worker qwen-tags  # filter to one worker
-    mlxctl start <name>           # load a backend (for swap: switch to it)
-    mlxctl stop <name>            # stop a backend
-    mlxctl restart <name>         # stop then start
-    mlxctl swap <name>            # alias for start
+    mlxctl start <member>         # load a backend (for swap: switch to it)
+    mlxctl stop <member>          # stop a backend
+    mlxctl restart <member>       # stop then start
+    mlxctl swap <member>          # alias for start
     mlxctl chat "hello"           # send a chat request via the router
     mlxctl tags                   # list available models (calls /v1/models)
     mlxctl health                 # daemon liveness
     mlxctl config show            # print current TOML config
+    mlxctl add <path-or-hf-repo>  # register a backend in config.toml
+    mlxctl scan <dir>             # bulk-register backends from a directory
     mlxctl bootstrap [--path P]   # create a venv with mlx_lm + friends (fresh machines)
+
+`MLXD_ROUTER` overrides the router URL `chat` and `tags` use; otherwise it's read from `~/.config/mlx/config.toml` (`router.host:port`).
 
 ## HTTP surface
 
