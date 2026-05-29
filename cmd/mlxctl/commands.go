@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/guygrigsby/mlx-stack/internal/ipc"
 	"github.com/spf13/cobra"
 )
 
@@ -66,7 +67,7 @@ func newHealthCmd() *cobra.Command {
 func newStartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start <name>",
-		Short: "Start or load a backend",
+		Short: "Start or load a backend (a group name loads its default member, e.g. 'start chat')",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body, _ := json.Marshal(map[string]string{"name": args[0]})
@@ -81,20 +82,89 @@ func newStartCmd() *cobra.Command {
 }
 
 func newStopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop <name>",
-		Short: "Stop a backend",
-		Args:  cobra.ExactArgs(1),
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "stop <name>...",
+		Short: "Stop one or more backends (or all running ones with --all)",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, _ := json.Marshal(map[string]string{"name": args[0]})
-			resp, err := newClient().PostJSON(context.Background(), "/v1/stop", body)
-			if err != nil {
-				return fmt.Errorf("stop failed: %v\n%s", err, resp)
+			if all {
+				if len(args) > 0 {
+					return fmt.Errorf("stop: pass names or --all, not both")
+				}
+				return stopAll()
 			}
-			fmt.Println(string(resp))
+			if len(args) == 0 {
+				return fmt.Errorf("stop: requires at least one backend name (or --all)")
+			}
+
+			c := newClient()
+			cx, cancel := ctx()
+			defer cancel()
+
+			failed := 0
+			for _, name := range args {
+				if resp, err := stopBackend(cx, c, name); err != nil {
+					failed++
+					fmt.Printf("stop %s: failed: %v\n%s\n", name, err, resp)
+					continue
+				}
+				fmt.Printf("stopped %s\n", name)
+			}
+			if failed > 0 {
+				return fmt.Errorf("%d backend(s) failed to stop", failed)
+			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false, "stop every running backend (skips external backends)")
+	return cmd
+}
+
+// stopBackend POSTs a stop request for one backend by name.
+func stopBackend(cx context.Context, c *ipc.Client, name string) ([]byte, error) {
+	body, _ := json.Marshal(map[string]string{"name": name})
+	return c.PostJSON(cx, "/v1/stop", body)
+}
+
+// stopAll stops every running, locally-managed backend. External backends are
+// remote and have no process to stop, so they're skipped. It tries every
+// backend even if one fails, then reports any failures.
+func stopAll() error {
+	c := newClient()
+	cx, cancel := ctx()
+	defer cancel()
+
+	body, err := c.Get(cx, "/v1/status")
+	if err != nil {
+		return notRunning()
+	}
+	var s statusJSON
+	if err := json.Unmarshal(body, &s); err != nil {
+		return fmt.Errorf("parse status: %w", err)
+	}
+
+	stopped, failed := 0, 0
+	for _, b := range s.Backends {
+		if !b.Running || b.Mode == "external" {
+			continue
+		}
+		if resp, err := stopBackend(cx, c, b.Name); err != nil {
+			failed++
+			fmt.Printf("stop %s: failed: %v\n%s\n", b.Name, err, resp)
+			continue
+		}
+		stopped++
+		fmt.Printf("stopped %s\n", b.Name)
+	}
+
+	if stopped == 0 && failed == 0 {
+		fmt.Println("no running backends")
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d backend(s) failed to stop", failed)
+	}
+	return nil
 }
 
 func newRestartCmd() *cobra.Command {

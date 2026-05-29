@@ -28,13 +28,22 @@ type BackendStatus struct {
 	Engine      string `json:"engine"`
 	URL         string `json:"url"`
 	Running     bool   `json:"running"`
+	State       string `json:"state"` // "stopped" | "loading" | "ready"
+	Model       string `json:"model,omitempty"`
 	PID         int    `json:"pid"`
 	CurrentName string `json:"current_name,omitempty"`
 }
 
 type StatusResponse struct {
+	Router   RouterInfo                    `json:"router"`
 	Backends []BackendStatus               `json:"backends"`
 	Workers  map[string]obsstate.WorkerObs `json:"workers,omitempty"`
+}
+
+type RouterInfo struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	ExtraPorts []int  `json:"extra_ports,omitempty"`
 }
 
 type nameReq struct {
@@ -45,6 +54,12 @@ type nameReq struct {
 // the supervisor package (which would create a cycle).
 type currentNameAccessor interface {
 	Current() string
+}
+
+// phaseAccessor lets us read a backend's load phase ("stopped"/"loading"/
+// "ready") when it has one (Persistent). Others fall back to Running().
+type phaseAccessor interface {
+	Phase() string
 }
 
 func (h *Handlers) Mux() http.Handler {
@@ -92,7 +107,15 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 			Engine:  b.Engine(),
 			URL:     b.BaseURL(),
 			Running: b.Running(),
+			Model:   b.UpstreamModel(),
 			PID:     b.PID(),
+		}
+		if ph, ok := b.(phaseAccessor); ok {
+			s.State = ph.Phase()
+		} else if b.Running() {
+			s.State = "ready"
+		} else {
+			s.State = "stopped"
 		}
 		if cn, ok := b.(currentNameAccessor); ok {
 			s.CurrentName = cn.Current()
@@ -100,6 +123,13 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 		statuses = append(statuses, s)
 	}
 	resp := StatusResponse{Backends: statuses}
+	if h.Config != nil {
+		resp.Router = RouterInfo{
+			Host:       h.Config.Router.Host,
+			Port:       h.Config.Router.Port,
+			ExtraPorts: h.Config.Router.ExtraPorts,
+		}
+	}
 	if h.ObsStore != nil {
 		resp.Workers = h.ObsStore.Snapshot()
 	}

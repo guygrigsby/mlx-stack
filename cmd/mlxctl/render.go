@@ -4,9 +4,43 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 )
+
+const (
+	ansiReset  = "\033[0m"
+	ansiRed    = "\033[31m"
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
+	// ansiDefault is the default-foreground SGR. It has no visible effect but
+	// the same byte length as a color code, so wrapping the RUNNING header in
+	// it gives that header cell the same escape overhead as the colored data
+	// cells. tabwriter counts escape bytes toward column width, so uniform
+	// overhead across the column keeps every other column aligned.
+	ansiDefault = "\033[39m"
+)
+
+// useColor reports whether status output to w should be colorized: only when w
+// is a terminal and NO_COLOR is unset. A bytes.Buffer or a pipe yields false,
+// keeping piped/redirected output and tests free of escape codes.
+func useColor(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
 
 type backendStatusJSON struct {
 	Name        string `json:"name"`
@@ -15,6 +49,8 @@ type backendStatusJSON struct {
 	Engine      string `json:"engine"`
 	URL         string `json:"url"`
 	Running     bool   `json:"running"`
+	State       string `json:"state"`
+	Model       string `json:"model"`
 	PID         int    `json:"pid"`
 	CurrentName string `json:"current_name"`
 }
@@ -34,7 +70,14 @@ type workerObsJSON struct {
 	} `json:"latest_timing"`
 }
 
+type routerJSON struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	ExtraPorts []int  `json:"extra_ports"`
+}
+
 type statusJSON struct {
+	Router   routerJSON               `json:"router"`
 	Backends []backendStatusJSON      `json:"backends"`
 	Workers  map[string]workerObsJSON `json:"workers"`
 }
@@ -46,8 +89,28 @@ func renderStatus(w io.Writer, body []byte) {
 		fmt.Fprintln(w, string(body))
 		return
 	}
+	color := useColor(w)
+
+	// Router section: the daemon answered, so it's up. Shown above the
+	// backends with its listen port(s).
+	if s.Router.Port > 0 {
+		up := "running"
+		if color {
+			up = ansiGreen + up + ansiReset
+		}
+		fmt.Fprintf(w, "ROUTER  http://%s:%d  %s\n", s.Router.Host, s.Router.Port, up)
+		for _, p := range s.Router.ExtraPorts {
+			fmt.Fprintf(w, "        http://%s:%d\n", s.Router.Host, p)
+		}
+		fmt.Fprintln(w)
+	}
+
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tGROUP\tMODE\tENGINE\tURL\tRUNNING\tPID\tCURRENT\tMEM(active/cache/peak)\tLAST TIMING")
+	runHdr := "RUNNING"
+	if color {
+		runHdr = ansiDefault + runHdr + ansiReset
+	}
+	fmt.Fprintf(tw, "NAME\tGROUP\tMODE\tENGINE\tMODEL\tURL\t%s\tPID\tCURRENT\tMEM(active/cache/peak)\tLAST TIMING\n", runHdr)
 	names := make([]string, 0, len(s.Backends))
 	idx := map[string]backendStatusJSON{}
 	for _, b := range s.Backends {
@@ -76,18 +139,49 @@ func renderStatus(w io.Writer, body []byte) {
 				break
 			}
 		}
-		running := "no"
-		if b.Running {
-			running = "yes"
+		// Tri-state run cell: ready=yes (green), loading=loading (yellow),
+		// stopped=no (red). Falls back to Running for an older daemon that
+		// doesn't report state.
+		running, rc := "no", ansiRed
+		switch b.State {
+		case "ready":
+			running, rc = "yes", ansiGreen
+		case "loading":
+			running, rc = "loading", ansiYellow
+		case "stopped", "":
+			if b.State == "" && b.Running {
+				running, rc = "yes", ansiGreen
+			}
+		}
+		if color {
+			running = rc + running + ansiReset
 		}
 		current := b.CurrentName
 		if current == "" {
 			current = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			b.Name, b.Group, b.Mode, b.Engine, b.URL, running, b.PID, current, mem, tim)
+		// Group only means anything for swap backends (members sharing one
+		// slot). For persistent/external it's a no-op, so don't imply otherwise.
+		group := "-"
+		if b.Mode == "swap" {
+			group = b.Group
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			b.Name, group, b.Mode, b.Engine, shortModel(b.Model), b.URL, running, b.PID, current, mem, tim)
 	}
 	tw.Flush()
+}
+
+// shortModel trims a local model directory to its last path segment (the model
+// name) while leaving Hugging Face repo ids like "org/Model-6bit" intact.
+func shortModel(m string) string {
+	if m == "" {
+		return "-"
+	}
+	if strings.HasPrefix(m, "/") {
+		return filepath.Base(m)
+	}
+	return m
 }
 
 func humanBytes(b int64) string {

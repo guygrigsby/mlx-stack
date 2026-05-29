@@ -107,6 +107,14 @@ func (g *Group) Members() []config.BackendSpec {
 }
 
 func (g *Group) EnsureLoaded(ctx context.Context, name string) error {
+	// Passing the group name itself (e.g. `mlxctl start chat` or a chat
+	// request to model "chat") means "load the default member".
+	if name == g.opts.Name {
+		if g.opts.DefaultMember == "" {
+			return fmt.Errorf("group %q has no default member", g.opts.Name)
+		}
+		name = g.opts.DefaultMember
+	}
 	spec, ok := g.opts.Members[name]
 	if !ok {
 		return fmt.Errorf("group %q has no member %q", g.opts.Name, name)
