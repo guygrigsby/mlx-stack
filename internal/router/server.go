@@ -12,24 +12,17 @@ import (
 type ServerOpts struct {
 	Config   *config.Config
 	Registry *Registry
-	Names    []string // for catalog; if empty, derive from Registry
 }
 
 type Server struct {
 	cfg      *config.Config
 	registry *Registry
-	catalog  *Catalog
 }
 
 func NewServer(opts ServerOpts) *Server {
-	names := opts.Names
-	if len(names) == 0 && opts.Registry != nil {
-		names = opts.Registry.Names()
-	}
 	return &Server{
 		cfg:      opts.Config,
 		registry: opts.Registry,
-		catalog:  NewCatalog(names),
 	}
 }
 
@@ -50,8 +43,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	// Derive the catalog live from the registry so hot-loaded backends appear
+	// in /v1/models without a restart.
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.catalog.OpenAIResponse())
+	json.NewEncoder(w).Encode(NewCatalog(s.registry.Names()).OpenAIResponse())
 }
 
 func (s *Server) handleProxyByModel(w http.ResponseWriter, r *http.Request) {

@@ -12,22 +12,22 @@ import (
 )
 
 type GroupOpts struct {
-	Name          string
-	Host          string
-	Port          int
-	Members       map[string]config.BackendSpec // member name → spec
-	DefaultMember string
+	Name           string
+	Host           string
+	Port           int
+	Members        map[string]config.BackendSpec // member name → spec
+	DefaultMember  string
 	SwapTimeoutSec int
-	ProbeInterval time.Duration
-	WorkerFactory func(spec config.BackendSpec) *Worker
+	ProbeInterval  time.Duration
+	WorkerFactory  func(spec config.BackendSpec) *Worker
 }
 
 type Group struct {
-	opts   GroupOpts
-	mu     sync.Mutex
-	state  *backend.State
+	opts    GroupOpts
+	mu      sync.Mutex
+	state   *backend.State
 	current string
-	worker *Worker
+	worker  *Worker
 
 	upstreamURLOverride string
 }
@@ -99,6 +99,8 @@ func (g *Group) Current() string {
 
 // Members returns the spec slice in arbitrary order.
 func (g *Group) Members() []config.BackendSpec {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	out := make([]config.BackendSpec, 0, len(g.opts.Members))
 	for _, m := range g.opts.Members {
 		out = append(out, m)
@@ -106,22 +108,43 @@ func (g *Group) Members() []config.BackendSpec {
 	return out
 }
 
+// AddMember registers a new swap member at runtime (hot reload). The member
+// joins on the group's existing port; its own spec.Port is ignored, and a
+// mismatch is reported to the caller so it can warn. Returns false if a member
+// of that name already exists (additive reload skips it). The new member is not
+// spawned; it loads lazily on first request like any swap member.
+func (g *Group) AddMember(spec config.BackendSpec) (added bool, portMismatch bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, exists := g.opts.Members[spec.Name]; exists {
+		return false, false
+	}
+	mismatch := spec.Port != 0 && spec.Port != g.opts.Port
+	spec.Port = g.opts.Port
+	spec.Host = g.opts.Host
+	g.opts.Members[spec.Name] = spec
+	return true, mismatch
+}
+
 func (g *Group) EnsureLoaded(ctx context.Context, name string) error {
 	// Passing the group name itself (e.g. `mlxctl start chat` or a chat
-	// request to model "chat") means "load the default member".
+	// request to model "chat") means "load the default member". Name and
+	// DefaultMember are fixed at construction, so reading them before the lock
+	// is safe; the Members map is mutable (AddMember), so it's read under mu.
 	if name == g.opts.Name {
 		if g.opts.DefaultMember == "" {
 			return fmt.Errorf("group %q has no default member", g.opts.Name)
 		}
 		name = g.opts.DefaultMember
 	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	spec, ok := g.opts.Members[name]
 	if !ok {
 		return fmt.Errorf("group %q has no member %q", g.opts.Name, name)
 	}
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
 
 	if g.current == name && g.worker != nil {
 		return nil

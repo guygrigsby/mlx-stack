@@ -42,7 +42,7 @@ func TestServer_ChatCompletionFlow(t *testing.T) {
 	reg.RegisterAlias("valkyrie", bk)
 
 	cfg := &config.Config{}
-	srv := NewServer(ServerOpts{Config: cfg, Registry: reg, Names: []string{"chat", "valkyrie"}})
+	srv := NewServer(ServerOpts{Config: cfg, Registry: reg})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"valkyrie"}`))
@@ -99,7 +99,13 @@ func TestServer_AudioSpeechRoute(t *testing.T) {
 }
 
 func TestServer_ListModels(t *testing.T) {
-	srv := NewServer(ServerOpts{Config: &config.Config{}, Registry: NewRegistry(), Names: []string{"a", "b", "embed"}})
+	// /v1/models derives names live from the registry.
+	reg := NewRegistry(
+		&fakeBackend{name: "a"},
+		&fakeBackend{name: "b"},
+		&fakeBackend{name: "embed"},
+	)
+	srv := NewServer(ServerOpts{Config: &config.Config{}, Registry: reg})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)

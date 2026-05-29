@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -254,6 +255,90 @@ func TestGroup_WorkerExitClearsState(t *testing.T) {
 	}
 	if atomic.LoadInt32(&started) != 2 {
 		t.Errorf("want 2 spawns after worker death, got %d", started)
+	}
+}
+
+func TestGroup_AddMemberHotLoadRoutes(t *testing.T) {
+	g, _ := newTestGroup(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	g.upstreamURLOverride = upstream.URL
+
+	added, mismatch := g.AddMember(config.BackendSpec{
+		Name: "p3", Mode: "swap", Group: "chat", Engine: "lm", Model: "/tmp/p3", Host: "127.0.0.1", Port: 0,
+	})
+	if !added {
+		t.Fatal("AddMember should report added for a new member")
+	}
+	if mismatch {
+		t.Errorf("no port mismatch expected when member port is 0")
+	}
+
+	// New member is in the member set and routable.
+	names := map[string]bool{}
+	for _, m := range g.Members() {
+		names[m.Name] = true
+	}
+	if !names["p3"] {
+		t.Fatalf("p3 not in members: %v", names)
+	}
+	if err := g.EnsureLoaded(context.Background(), "p3"); err != nil {
+		t.Fatalf("EnsureLoaded p3: %v", err)
+	}
+	if g.Current() != "p3" {
+		t.Errorf("current after loading hot-added member: %q", g.Current())
+	}
+}
+
+func TestGroup_ConcurrentAddMemberAndEnsureLoaded(t *testing.T) {
+	// Regression for the race between a hot reload's AddMember (mutating the
+	// member map) and a request's EnsureLoaded (reading it). Run under -race.
+	g, _ := newTestGroup(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	g.upstreamURLOverride = upstream.URL
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			g.AddMember(config.BackendSpec{Name: fmt.Sprintf("m%d", i), Group: "chat"})
+		}(i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = g.EnsureLoaded(context.Background(), "p1")
+			_ = g.Members()
+		}()
+	}
+	wg.Wait()
+}
+
+func TestGroup_AddMemberDuplicateAndPortMismatch(t *testing.T) {
+	g, _ := newTestGroup(t)
+
+	// p1 already exists.
+	if added, _ := g.AddMember(config.BackendSpec{Name: "p1", Group: "chat"}); added {
+		t.Error("AddMember should report not-added for an existing member name")
+	}
+
+	// A port differing from the group's is reported, and the member still
+	// joins on the group's port.
+	_, mismatch := g.AddMember(config.BackendSpec{Name: "p9", Group: "chat", Port: 65000})
+	if !mismatch {
+		t.Error("expected port mismatch to be reported")
+	}
+	for _, m := range g.Members() {
+		if m.Name == "p9" && m.Port != g.opts.Port {
+			t.Errorf("hot-added member should inherit group port %d, got %d", g.opts.Port, m.Port)
+		}
 	}
 }
 

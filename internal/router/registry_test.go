@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -10,17 +12,17 @@ type fakeBackend struct {
 	running                                  bool
 }
 
-func (f *fakeBackend) Name() string                                        { return f.name }
-func (f *fakeBackend) Group() string                                       { return f.group }
-func (f *fakeBackend) Mode() string                                        { return f.mode }
-func (f *fakeBackend) Engine() string                                      { return f.engine }
-func (f *fakeBackend) BaseURL() string                                     { return f.url }
-func (f *fakeBackend) UpstreamModel() string                               { return f.upstream }
-func (f *fakeBackend) Running() bool                                       { return f.running }
-func (f *fakeBackend) PID() int                                            { return 0 }
-func (f *fakeBackend) EnsureLoaded(_ context.Context, _ string) error     { return nil }
-func (f *fakeBackend) Start(_ context.Context) error                      { return nil }
-func (f *fakeBackend) Stop(_ context.Context) error                       { return nil }
+func (f *fakeBackend) Name() string                                   { return f.name }
+func (f *fakeBackend) Group() string                                  { return f.group }
+func (f *fakeBackend) Mode() string                                   { return f.mode }
+func (f *fakeBackend) Engine() string                                 { return f.engine }
+func (f *fakeBackend) BaseURL() string                                { return f.url }
+func (f *fakeBackend) UpstreamModel() string                          { return f.upstream }
+func (f *fakeBackend) Running() bool                                  { return f.running }
+func (f *fakeBackend) PID() int                                       { return 0 }
+func (f *fakeBackend) EnsureLoaded(_ context.Context, _ string) error { return nil }
+func (f *fakeBackend) Start(_ context.Context) error                  { return nil }
+func (f *fakeBackend) Stop(_ context.Context) error                   { return nil }
 
 func TestRegistry_ResolveByName(t *testing.T) {
 	a := &fakeBackend{name: "embed", mode: "persistent"}
@@ -68,5 +70,51 @@ func TestRegistry_NilSafe(t *testing.T) {
 	r.RegisterAlias("x", nil)
 	if len(r.All()) != 0 {
 		t.Errorf("nil should be skipped")
+	}
+}
+
+func TestRegistry_RegisterAndHas(t *testing.T) {
+	r := NewRegistry()
+	if r.Has("late") {
+		t.Fatal("Has should be false before Register")
+	}
+	b := &fakeBackend{name: "late", mode: "persistent"}
+	r.Register(b)
+	r.Register(nil) // no-op, must not panic
+	if !r.Has("late") {
+		t.Fatal("Has should be true after Register")
+	}
+	got, err := r.Resolve(context.Background(), "late")
+	if err != nil || got != b {
+		t.Errorf("resolve after register: got=%v err=%v", got, err)
+	}
+}
+
+// TestRegistry_ConcurrentRegisterResolve exercises the lock under -race: a
+// hot reload registers from one goroutine while the router resolves and lists
+// from others.
+func TestRegistry_ConcurrentRegisterResolve(t *testing.T) {
+	seed := &fakeBackend{name: "seed"}
+	r := NewRegistry(seed)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r.Register(&fakeBackend{name: fmt.Sprintf("b%d", i)})
+			r.RegisterAlias(fmt.Sprintf("a%d", i), seed)
+		}(i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = r.Resolve(context.Background(), "seed")
+			_ = r.Names()
+			_ = r.All()
+			_ = r.Has("seed")
+		}()
+	}
+	wg.Wait()
+	if !r.Has("seed") {
+		t.Error("seed lost")
 	}
 }

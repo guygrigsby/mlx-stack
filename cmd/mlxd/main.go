@@ -74,70 +74,34 @@ func newRunCmd() *cobra.Command {
 			obsStore := obsstate.New()
 			go obsStore.Run(context.Background(), broker)
 
-			// Build all backends.
+			// Shared deps for turning a BackendSpec into a running backend.
+			// Boot and hot reload both go through this builder so there is one
+			// construction path.
+			builder := &backendBuilder{
+				pythonBin: cfg.PythonBin,
+				shimDir:   shimDir,
+				defaults:  cfg.Defaults,
+				broker:    broker,
+				logger:    logger,
+			}
+
+			// Build all backends at boot.
 			var backends []bk.Backend
+			groupBackends := map[string]*supervisor.Group{}
+			aliases := map[string]string{}
 
 			// 1. Groups (swap-mode collections).
 			groups := cfg.BackendsByGroup()
-			groupBackends := map[string]*supervisor.Group{}
 			for groupName, members := range groups {
-				first := members[0]
-				defaultMember := first.Name
-				memberMap := map[string]config.BackendSpec{}
-				for _, m := range members {
-					memberMap[m.Name] = m
-					if m.Default {
-						defaultMember = m.Name
-					}
-				}
-				// Capture loop vars in closure-safe locals.
-				gName := groupName
-				mm := memberMap
-				g := supervisor.NewGroup(supervisor.GroupOpts{
-					Name:           gName,
-					Host:           first.Host,
-					Port:           first.Port,
-					Members:        mm,
-					DefaultMember:  defaultMember,
-					SwapTimeoutSec: 90,
-					ProbeInterval:  250 * time.Millisecond,
-					WorkerFactory: func(spec config.BackendSpec) *supervisor.Worker {
-						return supervisor.New(supervisor.WorkerSpec{
-							Name:    fmt.Sprintf("%s[%s]", gName, spec.Name),
-							Command: cfg.PythonBin,
-							Args:    launcherArgs(spec),
-							Env:     backendEnv(spec, cfg.Defaults, shimDir),
-							Broker:  broker,
-							Logger:  logger,
-						})
-					},
-				})
+				g := builder.newGroup(groupName, members)
 				groupBackends[groupName] = g
 				backends = append(backends, g)
 			}
 
 			// 2. Persistents.
 			var persistents []*supervisor.Persistent
-			for _, p := range cfg.Persistents() {
-				spec := p
-				pb := supervisor.NewPersistent(supervisor.PersistentOpts{
-					Name:          spec.Name,
-					Engine:        spec.Engine,
-					Host:          spec.Host,
-					Port:          spec.Port,
-					UpstreamModel: spec.Model,
-					Args:          launcherArgs(spec),
-					WorkerFactory: func(args []string) *supervisor.Worker {
-						return supervisor.New(supervisor.WorkerSpec{
-							Name:    spec.Name,
-							Command: cfg.PythonBin,
-							Args:    args,
-							Env:     backendEnv(spec, cfg.Defaults, shimDir),
-							Broker:  broker,
-							Logger:  logger,
-						})
-					},
-				})
+			for _, spec := range cfg.Persistents() {
+				pb := builder.newPersistent(spec)
 				// Don't spawn at daemon start. Persistent backends load lazily:
 				// the router calls EnsureLoaded on the first request, or load
 				// them up front with `mlxctl start <name>`.
@@ -161,15 +125,14 @@ func newRunCmd() *cobra.Command {
 				for _, m := range members {
 					if m.Name != groupName {
 						registry.RegisterAlias(m.Name, g)
+						aliases[m.Name] = g.Name()
 					}
 				}
 			}
 
-			allNames := cfg.AllNames()
 			routerSrv := router.NewServer(router.ServerOpts{
 				Config:   cfg,
 				Registry: registry,
-				Names:    allNames,
 			})
 
 			httpSrv := &http.Server{
@@ -177,15 +140,32 @@ func newRunCmd() *cobra.Command {
 				Handler: routerSrv.Handler(),
 			}
 
+			// liveState owns the mutable backend set that hot reload grows and
+			// shutdown drains. Both the admin reload handler and the shutdown
+			// path go through it under its lock.
+			live := &liveState{
+				builder:     builder,
+				registry:    registry,
+				cfgPath:     cfgPath,
+				groups:      groupBackends,
+				persistents: persistents,
+				backends:    backends,
+				aliases:     aliases,
+				logger:      logger,
+			}
+
+			handlers := &admin.Handlers{
+				Config:   cfg,
+				Broker:   broker,
+				ObsStore: obsStore,
+				Reload:   live.reload,
+			}
+			handlers.SetState(backends, aliases)
+			live.admin = handlers
+
 			adminSrv := &admin.Server{
 				SocketPath: socketPath,
-				Handler: (&admin.Handlers{
-					Config:   cfg,
-					Backends: backends,
-					Aliases:  collectAliases(groups, groupBackends),
-					Broker:   broker,
-					ObsStore: obsStore,
-				}).Mux(),
+				Handler:    handlers.Mux(),
 			}
 
 			if err := adminSrv.Start(); err != nil {
@@ -208,12 +188,7 @@ func newRunCmd() *cobra.Command {
 			logger.Info("shutting down")
 			shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			for _, g := range groupBackends {
-				_ = g.Stop(shutCtx)
-			}
-			for _, p := range persistents {
-				_ = p.Stop(shutCtx)
-			}
+			live.stopAll(shutCtx)
 			_ = httpSrv.Shutdown(shutCtx)
 			_ = adminSrv.Shutdown(shutCtx)
 			logger.Info("bye")
@@ -227,21 +202,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&logDir, "log-dir", "", "rotated log directory")
 	cmd.Flags().StringVar(&shimDirFlag, "shim-dir", "", "directory containing the mlx_stack Python package (overrides auto-detection)")
 	return cmd
-}
-
-// collectAliases returns a map of alias-name -> primary-backend-name for swap
-// group members. The admin layer uses it to resolve actions like
-// `mlxctl swap valkyrie` to the chat group.
-func collectAliases(groups map[string][]config.BackendSpec, groupBackends map[string]*supervisor.Group) map[string]string {
-	out := map[string]string{}
-	for groupName, members := range groups {
-		for _, m := range members {
-			if m.Name != groupName {
-				out[m.Name] = groupBackends[groupName].Name()
-			}
-		}
-	}
-	return out
 }
 
 func launcherArgs(spec config.BackendSpec) []string {

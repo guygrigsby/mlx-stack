@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,20 +29,22 @@ type fakeBackend struct {
 	stopErr     error
 }
 
-func (f *fakeBackend) Name() string    { return f.name }
-func (f *fakeBackend) Group() string   { return f.group }
-func (f *fakeBackend) Mode() string    { return f.mode }
-func (f *fakeBackend) Engine() string  { return f.engine }
-func (f *fakeBackend) BaseURL() string { return f.url }
+func (f *fakeBackend) Name() string          { return f.name }
+func (f *fakeBackend) Group() string         { return f.group }
+func (f *fakeBackend) Mode() string          { return f.mode }
+func (f *fakeBackend) Engine() string        { return f.engine }
+func (f *fakeBackend) BaseURL() string       { return f.url }
 func (f *fakeBackend) UpstreamModel() string { return f.upstream }
-func (f *fakeBackend) Running() bool   { return f.running }
-func (f *fakeBackend) PID() int        { return f.pid }
-func (f *fakeBackend) Current() string { return f.current }
+func (f *fakeBackend) Running() bool         { return f.running }
+func (f *fakeBackend) PID() int              { return f.pid }
+func (f *fakeBackend) Current() string       { return f.current }
 func (f *fakeBackend) EnsureLoaded(_ context.Context, n string) error {
 	f.ensureCalls = append(f.ensureCalls, n)
 	return f.ensureErr
 }
-func (f *fakeBackend) Start(_ context.Context) error { return f.EnsureLoaded(context.Background(), f.name) }
+func (f *fakeBackend) Start(_ context.Context) error {
+	return f.EnsureLoaded(context.Background(), f.name)
+}
 func (f *fakeBackend) Stop(_ context.Context) error {
 	f.stopCalls++
 	return f.stopErr
@@ -50,11 +53,8 @@ func (f *fakeBackend) Stop(_ context.Context) error {
 func newTestHandlers() (*Handlers, *fakeBackend, *fakeBackend) {
 	chat := &fakeBackend{name: "chat", group: "chat", mode: "swap", engine: "lm", url: "http://x:1234", running: true, pid: 100, current: "valkyrie"}
 	embed := &fakeBackend{name: "embed", group: "embed", mode: "persistent", engine: "embed", url: "http://x:1236", running: true, pid: 200}
-	h := &Handlers{
-		Config:   &config.Config{},
-		Backends: []bk.Backend{chat, embed},
-		Aliases:  map[string]string{"valkyrie": "chat", "scout": "chat"},
-	}
+	h := &Handlers{Config: &config.Config{}}
+	h.SetState([]bk.Backend{chat, embed}, map[string]string{"valkyrie": "chat", "scout": "chat"})
 	return h, chat, embed
 }
 
@@ -219,3 +219,49 @@ func TestHandler_StatusIncludesWorkers(t *testing.T) {
 		t.Errorf("worker mem: %+v", w)
 	}
 }
+
+func TestHandler_ReloadReturnsAddedNames(t *testing.T) {
+	h, _, _ := newTestHandlers()
+	h.Reload = func(_ context.Context) (ReloadResult, error) {
+		return ReloadResult{Added: []string{"newmodel"}, Skipped: []string{"chat"}}, nil
+	}
+	req := httptest.NewRequest("POST", "/v1/reload", nil)
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d body: %s", rr.Code, rr.Body.String())
+	}
+	var res ReloadResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Added) != 1 || res.Added[0] != "newmodel" {
+		t.Errorf("added: %v", res.Added)
+	}
+}
+
+func TestHandler_ReloadErrorIs500(t *testing.T) {
+	h, _, _ := newTestHandlers()
+	h.Reload = func(_ context.Context) (ReloadResult, error) {
+		return ReloadResult{}, errFake
+	}
+	req := httptest.NewRequest("POST", "/v1/reload", nil)
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
+	if rr.Code != 500 {
+		t.Errorf("status: %d", rr.Code)
+	}
+}
+
+func TestHandler_ReloadUnsupportedIs501(t *testing.T) {
+	h, _, _ := newTestHandlers()
+	h.Reload = nil
+	req := httptest.NewRequest("POST", "/v1/reload", nil)
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
+	if rr.Code != 501 {
+		t.Errorf("status: %d", rr.Code)
+	}
+}
+
+var errFake = fmt.Errorf("boom")

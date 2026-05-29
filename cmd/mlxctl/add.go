@@ -42,6 +42,7 @@ func newAddCmd() *cobra.Command {
 		def        bool
 		draft      string
 		noDownload bool
+		noReload   bool
 		overwrite  bool
 		configPath string
 
@@ -97,6 +98,25 @@ func newAddCmd() *cobra.Command {
 			}
 			fmt.Printf("%s [[backend]] name=%q engine=%s mode=%s port=%d → %s\n",
 				verb, spec.Name, spec.Engine, spec.Mode, spec.Port, configPath)
+
+			// Hot-reload the running daemon so the backend is usable now. Best
+			// effort: a down daemon must never fail the config write. Reload is
+			// additive, so an --overwrite edit needs a restart to take effect.
+			if exists {
+				fmt.Println("updated an existing backend; restart mlxd to apply (hot reload is additive only)")
+			} else if !noReload {
+				cx, cancel := ctx()
+				defer cancel()
+				res, down, rerr := callReload(cx)
+				switch {
+				case rerr != nil:
+					fmt.Fprintf(os.Stderr, "warning: %v\n", rerr)
+				case down:
+					fmt.Println("mlxd not running; takes effect on next start")
+				default:
+					printReload(res)
+				}
+			}
 			return nil
 		},
 	}
@@ -109,6 +129,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&def, "default", false, "mark as default member of its swap group")
 	cmd.Flags().StringVar(&draft, "draft", "", "draft model path (engine=lm only)")
 	cmd.Flags().BoolVar(&noDownload, "no-download", false, "for HF args: do not pre-download; let mlx_lm fetch lazily")
+	cmd.Flags().BoolVar(&noReload, "no-reload", false, "don't hot-reload the running mlxd after writing config")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace an existing backend of the same name in place")
 	cmd.Flags().StringVar(&configPath, "config", defaultConfigPathLocal(), "config.toml to modify")
 

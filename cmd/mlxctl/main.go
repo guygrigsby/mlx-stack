@@ -33,6 +33,7 @@ func main() {
 		newBootstrapCmd(),
 		newAddCmd(),
 		newScanCmd(),
+		newReloadCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

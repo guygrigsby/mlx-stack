@@ -3,12 +3,73 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"strings"
+	"syscall"
 
 	"github.com/guygrigsby/mlx-stack/internal/ipc"
 	"github.com/spf13/cobra"
 )
+
+// reloadResult mirrors admin.ReloadResult.
+type reloadResult struct {
+	Added   []string `json:"added"`
+	Skipped []string `json:"skipped"`
+}
+
+// callReload asks mlxd to re-read the config and register newly added
+// backends. daemonDown is true when mlxd is not reachable (socket missing or
+// connection refused), letting callers degrade gracefully instead of failing.
+func callReload(ctx context.Context) (res reloadResult, daemonDown bool, err error) {
+	resp, err := newClient().PostJSON(ctx, "/v1/reload", nil)
+	if err != nil {
+		if isDaemonDown(err) {
+			return res, true, nil
+		}
+		return res, false, fmt.Errorf("reload failed: %v\n%s", err, resp)
+	}
+	_ = json.Unmarshal(resp, &res)
+	return res, false, nil
+}
+
+// isDaemonDown reports whether err means mlxd isn't running (no socket file or
+// nothing listening), as opposed to a real reload error.
+func isDaemonDown(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, fs.ErrNotExist)
+}
+
+func printReload(res reloadResult) {
+	if len(res.Added) == 0 {
+		fmt.Println("reloaded mlxd (no new backends)")
+		return
+	}
+	fmt.Printf("reloaded mlxd (added: %s)\n", strings.Join(res.Added, ", "))
+}
+
+func newReloadCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Re-read the config and register newly added backends (no restart; additive only)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cx, cancel := ctx()
+			defer cancel()
+			res, down, err := callReload(cx)
+			if err != nil {
+				return err
+			}
+			if down {
+				return notRunning()
+			}
+			printReload(res)
+			return nil
+		},
+	}
+}
 
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{

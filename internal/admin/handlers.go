@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 
 	bk "github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
@@ -14,11 +15,41 @@ import (
 
 type Handlers struct {
 	Config   *config.Config
-	Backends []bk.Backend
-	// Aliases maps member-name -> primary backend name (used for swap groups).
-	Aliases  map[string]string
 	Broker   *logobs.Broker
 	ObsStore *obsstate.Store
+
+	// Reload, when set, re-reads the config and registers any newly added
+	// backends without a restart (additive). POST /v1/reload invokes it.
+	Reload func(context.Context) (ReloadResult, error)
+
+	// backends and aliases are the live view of registered backends. A hot
+	// reload grows them via SetState while request handlers read them, so they
+	// are guarded by mu.
+	mu       sync.RWMutex
+	backends []bk.Backend
+	aliases  map[string]string // member-name -> primary backend name (swap groups)
+}
+
+// ReloadResult reports what a hot reload changed.
+type ReloadResult struct {
+	Added   []string `json:"added"`
+	Skipped []string `json:"skipped"`
+}
+
+// SetState replaces the live backend/alias view. Called once at startup and
+// after each successful hot reload.
+func (h *Handlers) SetState(backends []bk.Backend, aliases map[string]string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.backends = backends
+	h.aliases = aliases
+}
+
+// snapshot returns the current backend list and alias map under a read lock.
+func (h *Handlers) snapshot() ([]bk.Backend, map[string]string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.backends, h.aliases
 }
 
 type BackendStatus struct {
@@ -70,20 +101,22 @@ func (h *Handlers) Mux() http.Handler {
 	mux.HandleFunc("POST /v1/stop", h.stop)
 	mux.HandleFunc("POST /v1/restart", h.restart)
 	mux.HandleFunc("POST /v1/swap", h.start) // alias
+	mux.HandleFunc("POST /v1/reload", h.reload)
 	mux.HandleFunc("GET /v1/logs/tail", h.tail)
 	return mux
 }
 
 func (h *Handlers) byName(name string) (bk.Backend, error) {
+	backends, aliases := h.snapshot()
 	// First try direct match.
-	for _, b := range h.Backends {
+	for _, b := range backends {
 		if b.Name() == name {
 			return b, nil
 		}
 	}
 	// Then try aliases (swap group members).
-	if primary, ok := h.Aliases[name]; ok {
-		for _, b := range h.Backends {
+	if primary, ok := aliases[name]; ok {
+		for _, b := range backends {
 			if b.Name() == primary {
 				return b, nil
 			}
@@ -92,14 +125,29 @@ func (h *Handlers) byName(name string) (bk.Backend, error) {
 	return nil, fmt.Errorf("unknown backend %q", name)
 }
 
+func (h *Handlers) reload(w http.ResponseWriter, r *http.Request) {
+	if h.Reload == nil {
+		http.Error(w, "reload not supported", 501)
+		return
+	}
+	res, err := h.Reload(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
 func (h *Handlers) health(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
 func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
-	statuses := make([]BackendStatus, 0, len(h.Backends))
-	for _, b := range h.Backends {
+	backends, _ := h.snapshot()
+	statuses := make([]BackendStatus, 0, len(backends))
+	for _, b := range backends {
 		s := BackendStatus{
 			Name:    b.Name(),
 			Group:   b.Group(),
