@@ -104,6 +104,46 @@ func TestPersistent_RestartsOnUnexpectedExit(t *testing.T) {
 	}
 }
 
+// A worker that never becomes ready (probe keeps failing) must not be spawned
+// twice: a second Start while the first is still loading waits, it does not
+// kick off a duplicate worker (which would be a duplicate model download).
+func TestPersistent_NoDoubleSpawnWhileLoading(t *testing.T) {
+	var started int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503) // never ready
+	}))
+	defer upstream.Close()
+
+	port, _ := freePort()
+	p := NewPersistent(PersistentOpts{
+		Name: "tags", Host: "127.0.0.1", Port: port,
+		ProbeInterval: 20 * time.Millisecond,
+		ProbeTimeout:  150 * time.Millisecond,
+		BackoffMin:    50 * time.Millisecond, BackoffMax: 200 * time.Millisecond,
+		WorkerFactory: func(args []string) *Worker {
+			atomic.AddInt32(&started, 1)
+			return New(WorkerSpec{Name: "tags", Command: "/bin/sh", Args: []string{"-c", "sleep 3"}})
+		},
+	})
+	p.upstreamURLOverride = upstream.URL
+
+	if err := p.Start(context.Background()); err == nil {
+		t.Fatal("expected a timeout error while still loading")
+	}
+	if got := p.Phase(); got != "loading" {
+		t.Fatalf("phase = %q, want loading", got)
+	}
+	if p.Running() {
+		t.Error("Running should be false while loading")
+	}
+	// Second attempt while loading: must reuse the in-flight load, not respawn.
+	_ = p.Start(context.Background())
+	if n := atomic.LoadInt32(&started); n != 1 {
+		t.Fatalf("want exactly 1 spawn while loading, got %d", n)
+	}
+	p.Stop(context.Background())
+}
+
 func TestPersistent_EnsureLoadedRejectsWrongName(t *testing.T) {
 	p := NewPersistent(PersistentOpts{
 		Name: "tags", Host: "127.0.0.1", Port: 1,

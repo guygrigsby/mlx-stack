@@ -138,11 +138,10 @@ func newRunCmd() *cobra.Command {
 						})
 					},
 				})
-				if err := pb.Start(context.Background()); err != nil {
-					logger.Error("persistent start failed", "name", spec.Name, "err", err)
-					continue
-				}
-				logger.Info("persistent backend up", "name", spec.Name, "url", pb.BaseURL())
+				// Don't spawn at daemon start. Persistent backends load lazily:
+				// the router calls EnsureLoaded on the first request, or load
+				// them up front with `mlxctl start <name>`.
+				logger.Info("persistent backend registered (lazy)", "name", spec.Name, "url", pb.BaseURL())
 				persistents = append(persistents, pb)
 				backends = append(backends, pb)
 			}

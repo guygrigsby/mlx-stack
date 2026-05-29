@@ -20,7 +20,8 @@ type Backend interface {
 	PID() int
 
 	// EnsureLoaded prepares the backend to serve a request for `name`.
-	// - Group: loads the named member onto the shared port if not already current.
+	// - Group: loads the named member onto the shared port if not already
+	//   current. Passing the group name itself loads the default member.
 	// - Persistent: starts the worker if not running. Errors if name != self.
 	// - External: no-op.
 	EnsureLoaded(ctx context.Context, name string) error

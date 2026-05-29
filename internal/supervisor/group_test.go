@@ -83,6 +83,26 @@ func TestGroup_SwapKillsOldSpawnsNew(t *testing.T) {
 	}
 }
 
+func TestGroup_EnsureLoadedGroupNameLoadsDefault(t *testing.T) {
+	// `mlxctl start chat` and chat requests to model "chat" both pass the
+	// group name (not a member name) to EnsureLoaded. It should resolve to
+	// the group's default member.
+	g, _ := newTestGroup(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	g.upstreamURLOverride = upstream.URL
+
+	if err := g.EnsureLoaded(context.Background(), "chat"); err != nil {
+		t.Fatal(err)
+	}
+	if g.Current() != "p1" {
+		t.Errorf("default member not loaded for group name: %q", g.Current())
+	}
+}
+
 func TestGroup_UnknownMember(t *testing.T) {
 	g, _ := newTestGroup(t)
 	err := g.EnsureLoaded(context.Background(), "ghost")

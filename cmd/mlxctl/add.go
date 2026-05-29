@@ -42,7 +42,15 @@ func newAddCmd() *cobra.Command {
 		def        bool
 		draft      string
 		noDownload bool
+		overwrite  bool
 		configPath string
+
+		temperature float64
+		topP        float64
+		topK        int
+		minP        float64
+		repPenalty  float64
+		maxTokens   int
 	)
 	cmd := &cobra.Command{
 		Use:   "add <path-or-hf-repo>",
@@ -62,14 +70,33 @@ func newAddCmd() *cobra.Command {
 			}
 
 			spec := buildSpec(modelDir, modelRef, name, engine, mode, group, host, port, def, draft, cfg)
-			if err := validateNewBackend(spec, cfg); err != nil {
+			spec.Sampler = samplerFromFlags(temperature, topP, topK, minP, repPenalty, maxTokens)
+
+			exists := false
+			for _, b := range cfg.Backends {
+				if b.Name == spec.Name {
+					exists = true
+					break
+				}
+			}
+			if exists && !overwrite {
+				return fmt.Errorf("backend name %q already exists (pass --overwrite to replace)", spec.Name)
+			}
+			if err := validateNewBackend(spec); err != nil {
 				return err
 			}
-			if err := appendBackend(configPath, spec); err != nil {
+
+			verb := "added"
+			if exists {
+				if err := replaceBackend(configPath, spec.Name, spec); err != nil {
+					return fmt.Errorf("replace: %w", err)
+				}
+				verb = "updated"
+			} else if err := appendBackend(configPath, spec); err != nil {
 				return fmt.Errorf("append: %w", err)
 			}
-			fmt.Printf("added [[backend]] name=%q engine=%s mode=%s port=%d → %s\n",
-				spec.Name, spec.Engine, spec.Mode, spec.Port, configPath)
+			fmt.Printf("%s [[backend]] name=%q engine=%s mode=%s port=%d → %s\n",
+				verb, spec.Name, spec.Engine, spec.Mode, spec.Port, configPath)
 			return nil
 		},
 	}
@@ -82,7 +109,17 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&def, "default", false, "mark as default member of its swap group")
 	cmd.Flags().StringVar(&draft, "draft", "", "draft model path (engine=lm only)")
 	cmd.Flags().BoolVar(&noDownload, "no-download", false, "for HF args: do not pre-download; let mlx_lm fetch lazily")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace an existing backend of the same name in place")
 	cmd.Flags().StringVar(&configPath, "config", defaultConfigPathLocal(), "config.toml to modify")
+
+	// Sampler defaults written to [backend.sampler]. Omitted fields (left at 0)
+	// fall through to mlx_lm's own CLI defaults.
+	cmd.Flags().Float64Var(&temperature, "temperature", 0, "sampler: temperature")
+	cmd.Flags().Float64Var(&topP, "top-p", 0, "sampler: top-p (nucleus)")
+	cmd.Flags().IntVar(&topK, "top-k", 0, "sampler: top-k")
+	cmd.Flags().Float64Var(&minP, "min-p", 0, "sampler: min-p")
+	cmd.Flags().Float64Var(&repPenalty, "repetition-penalty", 0, "sampler: repetition penalty")
+	cmd.Flags().IntVar(&maxTokens, "max-tokens", 0, "sampler: max tokens per response")
 	return cmd
 }
 
@@ -161,7 +198,7 @@ func newScanCmd() *cobra.Command {
 						continue
 					}
 					spec := buildSpec(c.path, c.path, c.name, c.engine, "", "", "127.0.0.1", 0, false, "", cfg)
-					if err := validateNewBackend(spec, cfg); err != nil {
+					if err := validateNewBackend(spec); err != nil {
 						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
 						continue
 					}
@@ -246,15 +283,30 @@ func expandHomeLocal(p string) string {
 }
 
 func downloadHF(repo, dest, pythonBin string) error {
-	cli := filepath.Join(filepath.Dir(pythonBin), "huggingface-cli")
-	if _, err := os.Stat(cli); err != nil {
-		return fmt.Errorf("huggingface-cli not found at %s. Install: %s -m pip install huggingface_hub", cli, pythonBin)
+	cli, err := hfCLI(pythonBin)
+	if err != nil {
+		return err
 	}
 	fmt.Printf("downloading %s → %s\n", repo, dest)
 	cmd := exec.Command(cli, "download", repo, "--local-dir", dest)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// hfCLI locates the Hugging Face CLI (`hf`, which replaced the deprecated
+// `huggingface-cli`). Prefers the binary installed alongside pythonBin (the
+// console script pip drops into the same venv bin/), then falls back to `hf`
+// on PATH for standalone installs.
+func hfCLI(pythonBin string) (string, error) {
+	local := filepath.Join(filepath.Dir(pythonBin), "hf")
+	if _, err := os.Stat(local); err == nil {
+		return local, nil
+	}
+	if p, err := exec.LookPath("hf"); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("hf CLI not found next to %s or on PATH (the `hf` command replaced the deprecated `huggingface-cli`). Upgrade: %s -m pip install --upgrade 'huggingface_hub>=0.34'", pythonBin, pythonBin)
 }
 
 func detectEngine(modelDir string) string {
@@ -373,12 +425,9 @@ func buildSpec(modelDir, modelRef, name, engine, mode, group, host string, port 
 	}
 }
 
-func validateNewBackend(spec config.BackendSpec, cfg *config.Config) error {
-	for _, b := range cfg.Backends {
-		if b.Name == spec.Name {
-			return fmt.Errorf("backend name %q already exists", spec.Name)
-		}
-	}
+// validateNewBackend checks mode/port constraints. The caller handles
+// duplicate-name policy (reject vs --overwrite) before this runs.
+func validateNewBackend(spec config.BackendSpec) error {
 	if spec.Mode == "swap" && spec.Port == 0 {
 		return fmt.Errorf("swap mode requires --port (group %q has no existing port to inherit)", spec.Group)
 	}
@@ -388,9 +437,29 @@ func validateNewBackend(spec config.BackendSpec, cfg *config.Config) error {
 	return nil
 }
 
-func appendBackend(path string, b config.BackendSpec) error {
+// samplerFromFlags returns a *Sampler if any field is set, else nil. Zero is
+// the "unset" sentinel here, matching the rest of the system where zero-valued
+// sampler params are omitted and mlx_lm's CLI defaults apply.
+func samplerFromFlags(temperature, topP float64, topK int, minP, repPenalty float64, maxTokens int) *config.Sampler {
+	if temperature == 0 && topP == 0 && topK == 0 && minP == 0 && repPenalty == 0 && maxTokens == 0 {
+		return nil
+	}
+	return &config.Sampler{
+		Temperature:       temperature,
+		TopP:              topP,
+		TopK:              topK,
+		MinP:              minP,
+		RepetitionPenalty: repPenalty,
+		MaxTokens:         maxTokens,
+	}
+}
+
+// renderBackend serializes one backend as a [[backend]] block. The returned
+// text starts with the "[[backend]]" header and ends with a trailing newline;
+// callers add any leading separator they need.
+func renderBackend(b config.BackendSpec) string {
 	var sb strings.Builder
-	sb.WriteString("\n[[backend]]\n")
+	sb.WriteString("[[backend]]\n")
 	sb.WriteString(fmt.Sprintf("name   = %q\n", b.Name))
 	sb.WriteString(fmt.Sprintf("engine = %q\n", b.Engine))
 	sb.WriteString(fmt.Sprintf("mode   = %q\n", b.Mode))
@@ -410,12 +479,133 @@ func appendBackend(path string, b config.BackendSpec) error {
 	if b.DraftModel != "" {
 		sb.WriteString(fmt.Sprintf("draft_model = %q\n", b.DraftModel))
 	}
+	if s := b.Sampler; s != nil {
+		sb.WriteString("  [backend.sampler]\n")
+		if s.Temperature != 0 {
+			sb.WriteString(fmt.Sprintf("  temperature        = %g\n", s.Temperature))
+		}
+		if s.TopP != 0 {
+			sb.WriteString(fmt.Sprintf("  top_p              = %g\n", s.TopP))
+		}
+		if s.TopK != 0 {
+			sb.WriteString(fmt.Sprintf("  top_k              = %d\n", s.TopK))
+		}
+		if s.MinP != 0 {
+			sb.WriteString(fmt.Sprintf("  min_p              = %g\n", s.MinP))
+		}
+		if s.RepetitionPenalty != 0 {
+			sb.WriteString(fmt.Sprintf("  repetition_penalty = %g\n", s.RepetitionPenalty))
+		}
+		if s.MaxTokens != 0 {
+			sb.WriteString(fmt.Sprintf("  max_tokens         = %d\n", s.MaxTokens))
+		}
+	}
+	return sb.String()
+}
 
+func appendBackend(path string, b config.BackendSpec) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = f.WriteString(sb.String())
+	_, err = f.WriteString("\n" + renderBackend(b))
 	return err
+}
+
+// replaceBackend rewrites the existing [[backend]] block named name in place,
+// preserving every other line (comments, other backends, spacing) untouched.
+func replaceBackend(path, name string, b config.BackendSpec) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(data)
+	trailingNL := strings.HasSuffix(text, "\n")
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+
+	start, end, ok := backendBlockSpan(lines, name)
+	if !ok {
+		return fmt.Errorf("backend %q not found in %s", name, path)
+	}
+
+	block := strings.Split(strings.TrimRight(renderBackend(b), "\n"), "\n")
+	out := make([]string, 0, len(lines)+len(block))
+	out = append(out, lines[:start]...)
+	out = append(out, block...)
+	out = append(out, lines[end:]...)
+
+	res := strings.Join(out, "\n")
+	if trailingNL {
+		res += "\n"
+	}
+	return os.WriteFile(path, []byte(res), 0o644)
+}
+
+// backendBlockSpan locates the [[backend]] block declaring name and returns its
+// half-open line range [start, end), with trailing blank lines excluded so the
+// separator before the following section survives a splice. ok is false when no
+// block declares that name.
+func backendBlockSpan(lines []string, name string) (start, end int, ok bool) {
+	// endsBlock reports whether a line opens a new TOML section, closing the
+	// current backend. "[backend.sampler]" and friends are subtables, so they
+	// stay inside the block.
+	endsBlock := func(s string) bool {
+		t := strings.TrimSpace(s)
+		if strings.HasPrefix(t, "[[") {
+			return true
+		}
+		return strings.HasPrefix(t, "[") && !strings.HasPrefix(t, "[backend.")
+	}
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "[[backend]]" {
+			continue
+		}
+		j := i + 1
+		for j < len(lines) && !endsBlock(lines[j]) {
+			j++
+		}
+		if blockDeclaresName(lines[i+1:j], name) {
+			// Back up over trailing blank and comment lines: a comment just
+			// before the next section is conventionally that section's header,
+			// not this block's content, so it must survive the splice.
+			k := j
+			for k > i+1 {
+				t := strings.TrimSpace(lines[k-1])
+				if t == "" || strings.HasPrefix(t, "#") {
+					k--
+					continue
+				}
+				break
+			}
+			return i, k, true
+		}
+		i = j - 1
+	}
+	return 0, 0, false
+}
+
+func blockDeclaresName(blockLines []string, name string) bool {
+	for _, l := range blockLines {
+		t := strings.TrimSpace(l)
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "[") {
+			continue
+		}
+		eq := strings.Index(t, "=")
+		if eq < 0 {
+			continue
+		}
+		if strings.TrimSpace(t[:eq]) != "name" {
+			continue
+		}
+		val := strings.TrimSpace(t[eq+1:])
+		// Drop any inline comment, then surrounding quotes.
+		if h := strings.Index(val, "#"); h >= 0 {
+			val = strings.TrimSpace(val[:h])
+		}
+		if strings.Trim(val, `"`) == name {
+			return true
+		}
+	}
+	return false
 }

@@ -1,4 +1,4 @@
-.PHONY: build test test-go test-py install clean fakemlx install-launchd uninstall-launchd dev
+.PHONY: build test test-go test-py install clean fakemlx install-launchd uninstall-launchd dev redeploy
 
 GOFLAGS    ?=
 PYTHON_BIN ?= $(HOME)/venvs/mlx/bin/python
@@ -33,15 +33,26 @@ clean:
 	rm -rf bin
 
 LAUNCHD_PLIST = $(HOME)/Library/LaunchAgents/dev.grigsby.mlxd.plist
+LAUNCHD_LABEL = dev.grigsby.mlxd
 
+# One-shot: build + install binaries (mlxd + mlxctl) and the Python shim, render
+# the plist, then (re)load it into launchd so the daemon is live immediately.
+# bootout-then-bootstrap reloads cleanly whether or not it was already loaded.
 install-launchd: install
 	@mkdir -p $(HOME)/Library/LaunchAgents $(HOME)/.logs/mlx
 	@sed -e "s|{{INSTALL_DIR}}|$(INSTALL_DIR)|g" -e "s|{{HOME}}|$(HOME)|g" \
 		deploy/dev.grigsby.mlxd.plist.template \
 		> $(LAUNCHD_PLIST)
 	@echo "Installed launchd plist at $(LAUNCHD_PLIST)"
-	@echo "Load:   launchctl load $(LAUNCHD_PLIST)"
-	@echo "Unload: launchctl unload $(LAUNCHD_PLIST)"
+	@echo "==> reloading $(LAUNCHD_LABEL)"
+	@launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
+	@i=0; while launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; do \
+		i=$$((i+1)); \
+		if [ $$i -ge 50 ]; then echo "timed out waiting for $(LAUNCHD_LABEL) to unload"; exit 1; fi; \
+		sleep 0.1; \
+	done
+	@launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST)
+	@echo "$(LAUNCHD_LABEL) loaded and running — mlxd + mlxctl live"
 
 uninstall-launchd:
 	@if [ -f $(LAUNCHD_PLIST) ]; then \
@@ -51,8 +62,6 @@ uninstall-launchd:
 	else \
 		echo "No plist at $(LAUNCHD_PLIST)"; \
 	fi
-
-LAUNCHD_LABEL = dev.grigsby.mlxd
 
 # Build + install binaries, then restart the launchd-managed mlxd so the new
 # binary takes effect. Fast iteration target for framework changes.
@@ -67,3 +76,24 @@ dev: install
 		echo "    launchctl load $(LAUNCHD_PLIST)"; \
 		exit 1; \
 	fi
+
+# Fully stop the daemon, install fresh binaries while it's down, then start it
+# back up. Unlike `dev` (which kickstarts in place), this guarantees the binary
+# is replaced with no running process holding the old one.
+redeploy:
+	@if [ ! -f $(LAUNCHD_PLIST) ]; then \
+		echo "No plist at $(LAUNCHD_PLIST). Run 'make install-launchd' first."; \
+		exit 1; \
+	fi
+	@echo "==> stopping $(LAUNCHD_LABEL)"
+	@launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
+	@$(MAKE) install
+	@echo "==> waiting for teardown"
+	@i=0; while launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; do \
+		i=$$((i+1)); \
+		if [ $$i -ge 50 ]; then echo "timed out waiting for $(LAUNCHD_LABEL) to unload"; exit 1; fi; \
+		sleep 0.1; \
+	done
+	@echo "==> starting $(LAUNCHD_LABEL)"
+	@launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST)
+	@echo "Redeployed $(LAUNCHD_LABEL) — new binaries live"
