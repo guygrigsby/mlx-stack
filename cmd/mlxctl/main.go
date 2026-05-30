@@ -38,6 +38,19 @@ router over HTTP (override with MLXD_ROUTER).`,
 		SilenceUsage: true,
 	}
 
+	// Output format is global so every command (and future ones) can honor
+	// it. Default is the human-readable view; --output json emits the raw
+	// daemon payload for scripting.
+	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", `output format: "text" or "json"`)
+	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		switch outputFormat {
+		case "text", "json":
+			return nil
+		default:
+			return fmt.Errorf("invalid --output %q (want \"text\" or \"json\")", outputFormat)
+		}
+	}
+
 	const (
 		grpLifecycle = "lifecycle"
 		grpModels    = "models"
@@ -98,4 +111,29 @@ func ctx() (context.Context, context.CancelFunc) {
 
 func notRunning() error {
 	return fmt.Errorf("mlxd is not running. Start with: mlxd run")
+}
+
+// outputFormat is the value of the global --output flag ("text" | "json").
+var outputFormat string
+
+func outputJSON() bool { return outputFormat == "json" }
+
+// printStatus prints the daemon's current status in the active output
+// format: the human table by default, the raw /v1/status JSON under
+// --output json. Lifecycle commands (start/restart/swap) use it so they
+// show what changed instead of a bare {"ok":true}.
+func printStatus() error {
+	c := newClient()
+	cx, cancel := ctx()
+	defer cancel()
+	b, err := c.Get(cx, "/v1/status")
+	if err != nil {
+		return notRunning()
+	}
+	if outputJSON() {
+		fmt.Println(string(b))
+		return nil
+	}
+	renderStatus(os.Stdout, b)
+	return nil
 }

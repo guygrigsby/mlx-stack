@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"strings"
 	"syscall"
 
@@ -76,15 +75,7 @@ func newStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show all backend state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := newClient()
-			cx, cancel := ctx()
-			defer cancel()
-			b, err := c.Get(cx, "/v1/status")
-			if err != nil {
-				return notRunning()
-			}
-			renderStatus(os.Stdout, b)
-			return nil
+			return printStatus()
 		},
 	}
 }
@@ -94,15 +85,7 @@ func newListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all configured backends (alias for status)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := newClient()
-			cx, cancel := ctx()
-			defer cancel()
-			b, err := c.Get(cx, "/v1/status")
-			if err != nil {
-				return notRunning()
-			}
-			renderStatus(os.Stdout, b)
-			return nil
+			return printStatus()
 		},
 	}
 }
@@ -136,8 +119,7 @@ func newStartCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("start failed: %v\n%s", err, resp)
 			}
-			fmt.Println(string(resp))
-			return nil
+			return printStatus()
 		},
 	}
 }
@@ -239,8 +221,7 @@ func newRestartCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("restart failed: %v\n%s", err, resp)
 			}
-			fmt.Println(string(resp))
-			return nil
+			return printStatus()
 		},
 	}
 }
@@ -256,8 +237,7 @@ func newSwapCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("swap failed: %v\n%s", err, resp)
 			}
-			fmt.Println(string(resp))
-			return nil
+			return printStatus()
 		},
 	}
 }
