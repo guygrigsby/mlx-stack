@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	bk "github.com/guygrigsby/mlx-stack/internal/backend"
@@ -119,6 +120,23 @@ func (h *Handlers) byName(name string) (bk.Backend, error) {
 		for _, b := range backends {
 			if b.Name() == primary {
 				return b, nil
+			}
+		}
+	}
+	// Case-insensitive fallback. Backends register lowercased names but HF
+	// repo ids are mixed-case, so `mlx start Model-MXFP4-Q4` should resolve.
+	lower := strings.ToLower(name)
+	for _, b := range backends {
+		if strings.ToLower(b.Name()) == lower {
+			return b, nil
+		}
+	}
+	for alias, primary := range aliases {
+		if strings.ToLower(alias) == lower {
+			for _, b := range backends {
+				if b.Name() == primary {
+					return b, nil
+				}
 			}
 		}
 	}

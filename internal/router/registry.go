@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/guygrigsby/mlx-stack/internal/backend"
@@ -48,22 +49,39 @@ func (r *Registry) RegisterAlias(alias string, b backend.Backend) {
 	r.byName[alias] = b
 }
 
+// resolveLocked looks a name up exactly first, then case-insensitively.
+// HF repo ids are mixed-case (e.g. mlx-community/gpt-oss-120b-MXFP4-Q4)
+// while backends register a lowercased name, so an OpenAI client that
+// sends the original-case model id must still resolve instead of 404ing.
+// Caller holds at least the read lock.
+func (r *Registry) resolveLocked(name string) (backend.Backend, bool) {
+	if b, ok := r.byName[name]; ok {
+		return b, true
+	}
+	lower := strings.ToLower(name)
+	for k, b := range r.byName {
+		if strings.ToLower(k) == lower {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
 // Has reports whether a name (primary or alias) is already registered.
 func (r *Registry) Has(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.byName[name]
+	_, ok := r.resolveLocked(name)
 	return ok
 }
 
 func (r *Registry) Resolve(_ context.Context, name string) (backend.Backend, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	b, ok := r.byName[name]
-	if !ok {
-		return nil, fmt.Errorf("unknown backend %q", name)
+	if b, ok := r.resolveLocked(name); ok {
+		return b, nil
 	}
-	return b, nil
+	return nil, fmt.Errorf("unknown backend %q", name)
 }
 
 // All returns the distinct set of registered backends (an alias and a

@@ -46,6 +46,29 @@ func TestRegistry_ResolveAlias(t *testing.T) {
 	}
 }
 
+// Backends register a lowercased name (HF repo ids are mixed-case), so a
+// model id sent in its original case must still resolve, not 404.
+func TestRegistry_ResolveCaseInsensitive(t *testing.T) {
+	b := &fakeBackend{name: "gpt-oss-120b-mxfp4-q4", mode: "persistent"}
+	r := NewRegistry(b)
+	for _, name := range []string{
+		"gpt-oss-120b-mxfp4-q4", // exact
+		"gpt-oss-120b-MXFP4-Q4", // mixed (what an HF-id client sends)
+		"GPT-OSS-120B-MXFP4-Q4", // upper
+	} {
+		got, err := r.Resolve(context.Background(), name)
+		if err != nil || got != b {
+			t.Errorf("Resolve(%q): got=%v err=%v", name, got, err)
+		}
+		if !r.Has(name) {
+			t.Errorf("Has(%q) = false", name)
+		}
+	}
+	if _, err := r.Resolve(context.Background(), "gpt-oss-7b"); err == nil {
+		t.Error("a genuinely different name must still be unknown")
+	}
+}
+
 func TestRegistry_Unknown(t *testing.T) {
 	r := NewRegistry()
 	_, err := r.Resolve(context.Background(), "ghost")
