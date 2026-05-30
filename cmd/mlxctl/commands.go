@@ -248,7 +248,7 @@ func newRestartCmd() *cobra.Command {
 func newSwapCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "swap <name>",
-		Short: "Alias for start",
+		Short: "Load a swap-group member by name, evicting the current one (alias for start)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body, _ := json.Marshal(map[string]string{"name": args[0]})

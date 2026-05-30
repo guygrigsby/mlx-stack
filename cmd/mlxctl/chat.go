@@ -135,7 +135,7 @@ func newChatCmd() *cobra.Command {
 	var noStream bool
 	cmd := &cobra.Command{
 		Use:   "chat \"...\"",
-		Short: "Send a chat request via the router (streams by default)",
+		Short: "Chat with the loaded chat model via the router (streams by default)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			model := resolveChatModel()
@@ -238,7 +238,7 @@ func streamChatSSE(r io.Reader) error {
 func newTagsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "tags",
-		Short: "List available models from the router",
+		Short: "List model IDs the router serves (GET /v1/models)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := http.Get(routerURL() + "/v1/models")
 			if err != nil {
