@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "mlx_stack",
+  "project_id": "b257ec5b-b353-455e-98d7-53e63de23586"
+}
