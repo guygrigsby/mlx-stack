@@ -184,6 +184,9 @@ func newRunCmd() *cobra.Command {
 				ObsStore: obsStore,
 				Reload:   live.reload,
 			}
+			if offloadMgr != nil {
+				handlers.Offloader = offloadMgr
+			}
 			handlers.SetState(backends, aliases)
 			live.admin = handlers
 

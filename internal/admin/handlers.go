@@ -24,6 +24,9 @@ type Handlers struct {
 	// backends without a restart (additive). POST /v1/reload invokes it.
 	Reload func(context.Context) (ReloadResult, error)
 
+	// Offloader, when set, enables POST /v1/offload and /v1/pull.
+	Offloader Offloader
+
 	// backends and aliases are the live view of registered backends. A hot
 	// reload grows them via SetState while request handlers read them, so they
 	// are guarded by mu.
@@ -104,6 +107,13 @@ type readinessChecker interface {
 	Ready(ctx context.Context) bool
 }
 
+// Offloader is the subset of offload.Manager the admin layer uses. Defined here
+// (not imported) to keep admin decoupled from the offload package.
+type Offloader interface {
+	Offload(name string) error
+	Pull(ctx context.Context, name string) error
+}
+
 // readinessProbeTimeout bounds each live probe so a wedged backend can't make
 // the status call itself hang.
 const readinessProbeTimeout = 2 * time.Second
@@ -117,6 +127,8 @@ func (h *Handlers) Mux() http.Handler {
 	mux.HandleFunc("POST /v1/restart", h.restart)
 	mux.HandleFunc("POST /v1/swap", h.start) // alias
 	mux.HandleFunc("POST /v1/reload", h.reload)
+	mux.HandleFunc("POST /v1/offload", h.offload)
+	mux.HandleFunc("POST /v1/pull", h.pull)
 	mux.HandleFunc("GET /v1/logs/tail", h.tail)
 	return mux
 }
@@ -283,6 +295,40 @@ func (h *Handlers) restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := b.EnsureLoaded(r.Context(), req.Name); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Write([]byte(`{"ok":true}`))
+}
+
+func (h *Handlers) offload(w http.ResponseWriter, r *http.Request) {
+	if h.Offloader == nil {
+		http.Error(w, "offload not configured", 501)
+		return
+	}
+	var req nameReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if err := h.Offloader.Offload(req.Name); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Write([]byte(`{"ok":true}`))
+}
+
+func (h *Handlers) pull(w http.ResponseWriter, r *http.Request) {
+	if h.Offloader == nil {
+		http.Error(w, "offload not configured", 501)
+		return
+	}
+	var req nameReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if err := h.Offloader.Pull(r.Context(), req.Name); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}

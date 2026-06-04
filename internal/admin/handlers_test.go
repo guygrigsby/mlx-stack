@@ -301,3 +301,53 @@ func TestHandler_ReloadUnsupportedIs501(t *testing.T) {
 }
 
 var errFake = fmt.Errorf("boom")
+
+type fakeOffloader struct {
+	offloaded []string
+	pulled    []string
+	err       error
+}
+
+func (f *fakeOffloader) Offload(name string) error {
+	f.offloaded = append(f.offloaded, name)
+	return f.err
+}
+func (f *fakeOffloader) Pull(ctx context.Context, name string) error {
+	f.pulled = append(f.pulled, name)
+	return f.err
+}
+
+func TestHandler_OffloadAndPull(t *testing.T) {
+	h, _, _ := newTestHandlers()
+	off := &fakeOffloader{}
+	h.Offloader = off
+
+	for _, tc := range []struct {
+		path string
+		want *[]string
+	}{
+		{"/v1/offload", &off.offloaded},
+		{"/v1/pull", &off.pulled},
+	} {
+		req := httptest.NewRequest("POST", tc.path, strings.NewReader(`{"name":"valkyrie"}`))
+		rr := httptest.NewRecorder()
+		h.Mux().ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("%s: code %d body %s", tc.path, rr.Code, rr.Body.String())
+		}
+		if len(*tc.want) != 1 || (*tc.want)[0] != "valkyrie" {
+			t.Errorf("%s: recorded %v", tc.path, *tc.want)
+		}
+	}
+}
+
+func TestHandler_OffloadUnconfiguredIs501(t *testing.T) {
+	h, _, _ := newTestHandlers()
+	h.Offloader = nil
+	req := httptest.NewRequest("POST", "/v1/offload", strings.NewReader(`{"name":"x"}`))
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
+	if rr.Code != 501 {
+		t.Errorf("code %d, want 501", rr.Code)
+	}
+}
