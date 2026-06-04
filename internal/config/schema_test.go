@@ -148,6 +148,29 @@ func TestEffectiveOverrides(t *testing.T) {
 	}
 }
 
+func TestOffloadValidation(t *testing.T) {
+	// Present but missing external_root is an error.
+	c := &Config{
+		PythonBin: "/x", Router: Router{Port: 8080},
+		Backends:  []BackendSpec{{Name: "a", Mode: "external", URL: "http://x"}},
+		Offload:   &Offload{LocalBudgetBytes: 1},
+	}
+	if err := c.Validate(); err == nil {
+		t.Fatal("offload without external_root should error")
+	}
+	// Fully specified is fine.
+	c.ModelsRoot = "/Users/x/mlx-models"
+	c.Offload.ExternalRoot = "/Volumes/weights-data/mlx-models"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid offload rejected: %v", err)
+	}
+	// Absent offload is fine (opt-in).
+	c.Offload = nil
+	if err := c.Validate(); err != nil {
+		t.Fatalf("nil offload rejected: %v", err)
+	}
+}
+
 func TestBackendsByGroup(t *testing.T) {
 	c := &Config{
 		Backends: []BackendSpec{

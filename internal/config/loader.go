@@ -26,6 +26,9 @@ func Load(path string) (*Config, error) {
 	c.LogDir = expandHome(c.LogDir)
 	c.ModelsRoot = expandHome(c.ModelsRoot)
 	c.PythonBin = expandHome(c.PythonBin)
+	if c.Offload != nil {
+		c.Offload.ExternalRoot = expandHome(c.Offload.ExternalRoot)
+	}
 
 	for i := range c.Backends {
 		c.Backends[i].Model = expandHome(c.Backends[i].Model)

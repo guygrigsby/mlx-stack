@@ -10,7 +10,16 @@ type Config struct {
 	PythonBin  string        `toml:"python_bin"`
 	Router     Router        `toml:"router"`
 	Defaults   Defaults      `toml:"defaults"`
+	Offload    *Offload      `toml:"offload"`
 	Backends   []BackendSpec `toml:"backend"`
+}
+
+// Offload configures two-tier model storage. When nil, models are single-tier
+// (today's behavior). ExternalRoot is the durable library; ModelsRoot is the
+// budgeted cache.
+type Offload struct {
+	ExternalRoot     string `toml:"external_root"`
+	LocalBudgetBytes int64  `toml:"local_budget_bytes"`
 }
 
 type Router struct {
@@ -170,6 +179,15 @@ func (c *Config) Validate() error {
 	for g, n := range groupDefaults {
 		if n > 1 {
 			return fmt.Errorf("group %q: only one backend may have default=true (got %d)", g, n)
+		}
+	}
+
+	if c.Offload != nil {
+		if c.Offload.ExternalRoot == "" {
+			return fmt.Errorf("offload.external_root: required when [offload] is set")
+		}
+		if c.ModelsRoot == "" {
+			return fmt.Errorf("offload: models_root required (it is the cache root)")
 		}
 	}
 	return nil
