@@ -139,15 +139,17 @@ func renderStatus(w io.Writer, body []byte) {
 				break
 			}
 		}
-		// Tri-state run cell: ready=yes (green), loading=loading (yellow),
-		// stopped=no (red). Falls back to Running for an older daemon that
-		// doesn't report state.
+		// Run cell: ready=yes (green), loading=loading (yellow), unhealthy=
+		// wedged (red, loaded but not answering), stopped=no (red). Falls back
+		// to Running for an older daemon that doesn't report state.
 		running, rc := "no", ansiRed
 		switch b.State {
 		case "ready":
 			running, rc = "yes", ansiGreen
 		case "loading":
 			running, rc = "loading", ansiYellow
+		case "unhealthy":
+			running, rc = "wedged", ansiRed
 		case "stopped", "":
 			if b.State == "" && b.Running {
 				running, rc = "yes", ansiGreen

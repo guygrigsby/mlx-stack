@@ -41,6 +41,36 @@ func newTestGroup(t *testing.T) (*Group, *int32) {
 	return g, &started
 }
 
+func TestGroup_ReadyReflectsLiveUpstream(t *testing.T) {
+	g, _ := newTestGroup(t)
+
+	// Not loaded yet -> not ready.
+	if g.Ready(context.Background()) {
+		t.Fatal("Ready() = true before any load, want false")
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	g.upstreamURLOverride = upstream.URL
+	if err := g.EnsureLoaded(context.Background(), "p1"); err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop(context.Background())
+
+	// Loaded and upstream answers -> ready.
+	if !g.Ready(context.Background()) {
+		t.Error("Ready() = false with a live upstream, want true")
+	}
+
+	// Upstream wedges (here: stops answering) -> not ready, though still loaded.
+	upstream.Close()
+	if g.Ready(context.Background()) {
+		t.Error("Ready() = true after upstream stopped answering, want false")
+	}
+}
+
 func TestGroup_NoSwapWhenAlreadyCurrent(t *testing.T) {
 	g, started := newTestGroup(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -46,6 +46,44 @@ func TestPersistent_StartProbesUntilReady(t *testing.T) {
 	}
 }
 
+func TestPersistent_ReadyReflectsLiveUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	port, _ := freePort()
+	p := NewPersistent(PersistentOpts{
+		Name:          "tags",
+		Engine:        "vlm",
+		Host:          "127.0.0.1",
+		Port:          port,
+		ProbeInterval: 20 * time.Millisecond,
+		ProbeTimeout:  5 * time.Second,
+		BackoffMin:    50 * time.Millisecond,
+		BackoffMax:    200 * time.Millisecond,
+		WorkerFactory: func(args []string) *Worker {
+			return New(WorkerSpec{Name: "tags", Command: "/bin/sh", Args: []string{"-c", "sleep 2"}})
+		},
+	})
+	p.upstreamURLOverride = upstream.URL
+
+	if p.Ready(context.Background()) {
+		t.Fatal("Ready() = true before start, want false")
+	}
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop(context.Background())
+
+	if !p.Ready(context.Background()) {
+		t.Error("Ready() = false with a live upstream, want true")
+	}
+	upstream.Close()
+	if p.Ready(context.Background()) {
+		t.Error("Ready() = true after upstream stopped answering, want false")
+	}
+}
+
 func TestPersistent_StopGraceful(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)

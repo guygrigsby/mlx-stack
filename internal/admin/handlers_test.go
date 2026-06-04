@@ -27,6 +27,8 @@ type fakeBackend struct {
 	stopCalls   int
 	ensureErr   error
 	stopErr     error
+
+	ready bool // upstream answers a live readiness probe
 }
 
 func (f *fakeBackend) Name() string          { return f.name }
@@ -38,6 +40,7 @@ func (f *fakeBackend) UpstreamModel() string { return f.upstream }
 func (f *fakeBackend) Running() bool         { return f.running }
 func (f *fakeBackend) PID() int              { return f.pid }
 func (f *fakeBackend) Current() string       { return f.current }
+func (f *fakeBackend) Ready(_ context.Context) bool { return f.ready }
 func (f *fakeBackend) EnsureLoaded(_ context.Context, n string) error {
 	f.ensureCalls = append(f.ensureCalls, n)
 	return f.ensureErr
@@ -51,8 +54,8 @@ func (f *fakeBackend) Stop(_ context.Context) error {
 }
 
 func newTestHandlers() (*Handlers, *fakeBackend, *fakeBackend) {
-	chat := &fakeBackend{name: "chat", group: "chat", mode: "swap", engine: "lm", url: "http://x:1234", running: true, pid: 100, current: "valkyrie"}
-	embed := &fakeBackend{name: "embed", group: "embed", mode: "persistent", engine: "embed", url: "http://x:1236", running: true, pid: 200}
+	chat := &fakeBackend{name: "chat", group: "chat", mode: "swap", engine: "lm", url: "http://x:1234", running: true, pid: 100, current: "valkyrie", ready: true}
+	embed := &fakeBackend{name: "embed", group: "embed", mode: "persistent", engine: "embed", url: "http://x:1236", running: true, pid: 200, ready: true}
 	h := &Handlers{Config: &config.Config{}}
 	h.SetState([]bk.Backend{chat, embed}, map[string]string{"valkyrie": "chat", "scout": "chat"})
 	return h, chat, embed
@@ -86,6 +89,39 @@ func TestHandler_Status(t *testing.T) {
 	chat := resp.Backends[0]
 	if chat.Name != "chat" || chat.Mode != "swap" || chat.CurrentName != "valkyrie" {
 		t.Errorf("chat: %+v", chat)
+	}
+}
+
+// A backend the supervisor still considers loaded (Running) but whose upstream
+// no longer answers a live probe must be reported as unhealthy, not "ready" —
+// otherwise status claims chat is loaded while it freezes.
+func TestHandler_Status_WedgedBackendReportsUnhealthy(t *testing.T) {
+	h, chat, _ := newTestHandlers()
+	chat.running = true // supervisor thinks it's loaded
+	chat.ready = false  // but the upstream is wedged
+
+	req := httptest.NewRequest("GET", "/v1/status", nil)
+	rr := httptest.NewRecorder()
+	h.Mux().ServeHTTP(rr, req)
+
+	var resp StatusResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var got *BackendStatus
+	for i := range resp.Backends {
+		if resp.Backends[i].Name == "chat" {
+			got = &resp.Backends[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("chat backend missing from status")
+	}
+	if got.State != "unhealthy" {
+		t.Errorf("State = %q, want %q", got.State, "unhealthy")
+	}
+	if got.Running {
+		t.Error("Running = true, want false for a wedged backend")
 	}
 }
 

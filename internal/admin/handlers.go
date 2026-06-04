@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	bk "github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
@@ -93,6 +94,19 @@ type currentNameAccessor interface {
 type phaseAccessor interface {
 	Phase() string
 }
+
+// readinessChecker lets status confirm a backend the supervisor believes is
+// loaded can actually serve right now. A backend that wedges after loading
+// still reports Running()==true forever (the load-time probe never re-runs),
+// so status probes the upstream live and reports "unhealthy" when it can't
+// answer. Backends that can probe their upstream implement it.
+type readinessChecker interface {
+	Ready(ctx context.Context) bool
+}
+
+// readinessProbeTimeout bounds each live probe so a wedged backend can't make
+// the status call itself hang.
+const readinessProbeTimeout = 2 * time.Second
 
 func (h *Handlers) Mux() http.Handler {
 	mux := http.NewServeMux()
@@ -182,6 +196,20 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 			s.State = "ready"
 		} else {
 			s.State = "stopped"
+		}
+		// A backend the supervisor reports as ready might have wedged after
+		// loading. Probe it live; if it can't answer, report the truth so
+		// status stops claiming a frozen backend is loaded.
+		if s.State == "ready" {
+			if rc, ok := b.(readinessChecker); ok {
+				pctx, cancel := context.WithTimeout(r.Context(), readinessProbeTimeout)
+				ready := rc.Ready(pctx)
+				cancel()
+				if !ready {
+					s.State = "unhealthy"
+					s.Running = false
+				}
+			}
 		}
 		if cn, ok := b.(currentNameAccessor); ok {
 			s.CurrentName = cn.Current()
@@ -288,6 +316,3 @@ func (h *Handlers) tail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
-// to keep the context import live (it's used by request handlers via r.Context()).
-var _ = context.Background

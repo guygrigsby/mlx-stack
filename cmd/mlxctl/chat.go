@@ -10,10 +10,31 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// chatHeaderTimeout bounds how long chat waits for the backend's first
+// response header. A cold swap can take up to the swap timeout (~90s) to
+// load the model, so this is generous; it exists to turn a wedged backend
+// (accepts the connection, never answers) from an infinite freeze into a
+// clear error. It does NOT limit streaming duration once headers arrive.
+const chatHeaderTimeout = 120 * time.Second
+
+// newChatClient returns an HTTP client that gives up if the backend never
+// sends a response header within timeout. Streaming the body afterwards is
+// unbounded, so long generations are unaffected.
+func newChatClient(timeout time.Duration) *http.Client {
+	return &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: timeout}}
+}
+
+var chatClient = newChatClient(chatHeaderTimeout)
+
+func postChat(client *http.Client, url string, body []byte) (*http.Response, error) {
+	return client.Post(url, "application/json", bytes.NewReader(body))
+}
 
 func loadCfg() *config.Config {
 	path := os.Getenv("MLX_CONFIG")
@@ -157,9 +178,9 @@ func newChatCmd() *cobra.Command {
 			}
 			body, _ := json.Marshal(payload)
 
-			resp, err := http.Post(routerURL()+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+			resp, err := postChat(chatClient, routerURL()+"/v1/chat/completions", body)
 			if err != nil {
-				return err
+				return fmt.Errorf("no response from %q (backend may be wedged; check `mlxctl status` and try `mlxctl restart %s`): %w", model, model, err)
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode != 200 {

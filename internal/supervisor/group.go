@@ -82,6 +82,41 @@ func (g *Group) Running() bool {
 	return g.worker != nil && g.current != ""
 }
 
+// Ready reports whether the loaded member's upstream answers a live probe
+// right now. Unlike Running (set once at load and never re-checked), Ready
+// re-probes every call, so a member that wedges after loading is reported as
+// not ready instead of silently "loaded".
+func (g *Group) Ready(ctx context.Context) bool {
+	g.mu.Lock()
+	loaded := g.worker != nil && g.current != ""
+	url := g.BaseURL() + "/v1/models"
+	if g.upstreamURLOverride != "" {
+		url = g.upstreamURLOverride + "/v1/models"
+	}
+	g.mu.Unlock()
+	if !loaded {
+		return false
+	}
+	return probeOnce(ctx, url)
+}
+
+// probeOnce reports whether a single GET to url returns 200 within a short
+// timeout. Used for live readiness checks where a wedged upstream must not
+// block the caller.
+func probeOnce(ctx context.Context, url string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
 func (g *Group) PID() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()

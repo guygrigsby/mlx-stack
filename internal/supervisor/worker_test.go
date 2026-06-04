@@ -7,6 +7,23 @@ import (
 	"time"
 )
 
+// A worker that emits parseable stderr right up to the moment it exits must
+// not panic with "send on closed channel": consumeStderr must finish before
+// wait() closes the events channel. Run under -race to surface the data race.
+func TestWorker_NoSendOnClosedEventsRace(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		w := New(WorkerSpec{
+			Name:    "race",
+			Command: "/bin/sh",
+			Args:    []string{"-c", `for n in $(seq 1 60); do echo "[mlx-launch] mem: active=$n cache=0 peak=0" 1>&2; done; exit 0`},
+		})
+		if err := w.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		<-w.Done()
+	}
+}
+
 func TestWorker_StartAndExitNaturally(t *testing.T) {
 	w := New(WorkerSpec{
 		Name:    "test-1",
@@ -48,15 +65,14 @@ func TestWorker_StreamingStderr(t *testing.T) {
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	events := []string{}
-	go func() {
-		for ev := range w.Events() {
-			events = append(events, ev.Raw)
-		}
-	}()
-
+	// Done is delivered after wait() closes the events channel, so by here the
+	// buffered events are complete and can be drained without a concurrent
+	// reader (which would race the len check below).
 	<-w.Done()
-	time.Sleep(50 * time.Millisecond)
+	var events []string
+	for ev := range w.Events() {
+		events = append(events, ev.Raw)
+	}
 	if len(events) < 5 {
 		t.Errorf("want >=5 events, got %d: %v", len(events), events)
 	}

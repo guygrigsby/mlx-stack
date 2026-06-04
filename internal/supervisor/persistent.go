@@ -80,6 +80,23 @@ func (p *Persistent) Running() bool {
 	return p.ph == phaseReady
 }
 
+// Ready reports whether the backend's upstream answers a live probe right now.
+// Running/Phase report phaseReady from the load-time probe and never re-check,
+// so Ready re-probes to catch a worker that wedged after becoming ready.
+func (p *Persistent) Ready(ctx context.Context) bool {
+	p.mu.Lock()
+	ready := p.ph == phaseReady
+	url := p.BaseURL() + "/v1/models"
+	if p.upstreamURLOverride != "" {
+		url = p.upstreamURLOverride + "/v1/models"
+	}
+	p.mu.Unlock()
+	if !ready {
+		return false
+	}
+	return probeOnce(ctx, url)
+}
+
 // Phase reports the load lifecycle: "stopped", "loading", or "ready". "loading"
 // covers a worker that's started but not yet serving, which on a first run
 // includes downloading the model from Hugging Face.

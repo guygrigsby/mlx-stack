@@ -24,6 +24,20 @@ func TestRenderStatus_Basic(t *testing.T) {
 	}
 }
 
+func TestRenderStatus_WedgedShowsUnhealthy(t *testing.T) {
+	body := []byte(`{
+		"backends": [
+			{"name":"chat","group":"chat","mode":"swap","engine":"lm","url":"http://x:1234","running":false,"state":"unhealthy","pid":100,"current_name":"valkyrie"}
+		]
+	}`)
+	var b bytes.Buffer
+	renderStatus(&b, body)
+	out := b.String()
+	if !strings.Contains(out, "wedged") {
+		t.Errorf("unhealthy backend should render as 'wedged', got: %s", out)
+	}
+}
+
 func TestHumanBytes(t *testing.T) {
 	cases := []struct {
 		in   int64

@@ -35,8 +35,9 @@ type Worker struct {
 	stderrMu    sync.Mutex
 	stderrLines []string
 
-	events chan logobs.Event
-	done   chan WorkerResult
+	events     chan logobs.Event
+	done       chan WorkerResult
+	stderrDone chan struct{} // closed when consumeStderr returns
 
 	startOnce sync.Once
 }
@@ -46,9 +47,10 @@ func New(spec WorkerSpec) *Worker {
 		spec.Logger = slog.Default()
 	}
 	return &Worker{
-		spec:   spec,
-		events: make(chan logobs.Event, 256),
-		done:   make(chan WorkerResult, 1),
+		spec:       spec,
+		events:     make(chan logobs.Event, 256),
+		done:       make(chan WorkerResult, 1),
+		stderrDone: make(chan struct{}),
 	}
 }
 
@@ -85,6 +87,9 @@ func (w *Worker) Start(ctx context.Context) error {
 }
 
 func (w *Worker) consumeStderr(r io.Reader) {
+	// Signal wait() that no more sends to w.events will happen, so it can
+	// safely close the channel without racing a send here.
+	defer close(w.stderrDone)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -130,6 +135,9 @@ func (w *Worker) wait() {
 			code = -1
 		}
 	}
+	// cmd.Wait closed the stderr pipe; wait for consumeStderr to drain it and
+	// stop sending before closing events (else: send on closed channel).
+	<-w.stderrDone
 	close(w.events)
 	w.done <- WorkerResult{ExitCode: code, Err: err}
 	close(w.done)
