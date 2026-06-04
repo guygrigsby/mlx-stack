@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -66,6 +67,50 @@ func TestRegistry_ResolveCaseInsensitive(t *testing.T) {
 	}
 	if _, err := r.Resolve(context.Background(), "gpt-oss-7b"); err == nil {
 		t.Error("a genuinely different name must still be unknown")
+	}
+}
+
+// Names must return a stable, sorted order. /v1/models is derived from it, and
+// an OpenAI client that tracks the model picker by list position will select the
+// wrong model if the order reshuffles between polls (Go map iteration is
+// randomized). Registering in non-sorted order must still list sorted.
+func TestRegistry_NamesSorted(t *testing.T) {
+	r := NewRegistry(
+		&fakeBackend{name: "omnivoice"},
+		&fakeBackend{name: "chat"},
+		&fakeBackend{name: "zerofata"},
+		&fakeBackend{name: "coder"},
+	)
+	r.RegisterAlias("scout", &fakeBackend{name: "chat"})
+	r.RegisterAlias("anubis", &fakeBackend{name: "chat"})
+
+	want := []string{"anubis", "chat", "coder", "omnivoice", "scout", "zerofata"}
+	// Call repeatedly: every call must yield the same sorted order.
+	for i := 0; i < 5; i++ {
+		got := r.Names()
+		if !slices.Equal(got, want) {
+			t.Fatalf("Names() call %d = %v, want %v", i, got, want)
+		}
+	}
+}
+
+// The registry canonicalizes names to lowercase at the boundary: a mixed-case
+// registration is stored, listed, and resolved as lowercase, and a query in any
+// case finds it. This makes resolution a single map lookup rather than a
+// case-insensitive scan, and /v1/models emits one consistent id per backend.
+func TestRegistry_CanonicalLowercase(t *testing.T) {
+	b := &fakeBackend{name: "Org/Model-MXFP4-Q4"}
+	r := NewRegistry(b)
+	r.RegisterAlias("Scout-V2", b)
+
+	if got := r.Names(); !slices.Equal(got, []string{"org/model-mxfp4-q4", "scout-v2"}) {
+		t.Fatalf("Names() = %v, want lowercased", got)
+	}
+	for _, q := range []string{"Org/Model-MXFP4-Q4", "org/model-mxfp4-q4", "ORG/MODEL-MXFP4-Q4", "Scout-V2", "scout-v2"} {
+		got, err := r.Resolve(context.Background(), q)
+		if err != nil || got != b {
+			t.Errorf("Resolve(%q): got=%v err=%v", q, got, err)
+		}
 	}
 }
 
