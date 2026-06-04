@@ -207,6 +207,11 @@ func (m *Manager) Offload(name string) error {
 	defer m.mu.Unlock()
 
 	if !m.opt.FS.Exists(m.cachePath(name)) {
+		// Not in cache: already offloaded (library has it) is a no-op; a name
+		// in neither cache nor library is a user error, not a silent success.
+		if m.opt.FS.Mounted(m.opt.LibraryRoot) && !m.opt.FS.Exists(m.libPath(name)) {
+			return fmt.Errorf("unknown model %q (not in cache or library)", name)
+		}
 		return nil
 	}
 	if !m.opt.FS.Mounted(m.opt.LibraryRoot) {

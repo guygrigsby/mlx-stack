@@ -5,10 +5,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// resolveModelName maps a backend name (as shown in `mlxctl status`, e.g. a
+// normalized/lowercased HF repo id) to its on-disk model directory basename,
+// which is what offload/pull key on. Backend names and dir names often differ
+// (case, dots vs dashes). An arg that matches no backend passes through
+// unchanged, so an exact dir name still works and an unknown name reaches the
+// server (which errors).
+func resolveModelName(cfg *config.Config, arg string) string {
+	if cfg == nil {
+		return arg
+	}
+	for _, b := range cfg.Backends {
+		if strings.EqualFold(b.Name, arg) && b.Model != "" {
+			return filepath.Base(b.Model)
+		}
+	}
+	return arg
+}
 
 // inactiveModels returns cache dir names not referenced as Model or DraftModel
 // by any backend in cfg.
@@ -86,7 +105,8 @@ func newOffloadCmd() *cobra.Command {
 			if len(args) != 1 {
 				return fmt.Errorf("usage: mlxctl offload <model> | --inactive")
 			}
-			if err := postName("/v1/offload", args[0]); err != nil {
+			name := resolveModelName(loadCfg(), args[0])
+			if err := postName("/v1/offload", name); err != nil {
 				return err
 			}
 			return printStatus()
@@ -102,7 +122,8 @@ func newPullCmd() *cobra.Command {
 		Short: "Pre-warm a model from the external library into the SSD cache",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := postName("/v1/pull", args[0]); err != nil {
+			name := resolveModelName(loadCfg(), args[0])
+			if err := postName("/v1/pull", name); err != nil {
 				return err
 			}
 			return printStatus()

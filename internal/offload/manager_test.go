@@ -217,6 +217,22 @@ func TestOffload_DriveAbsentErrors(t *testing.T) {
 	}
 }
 
+func TestOffload_UnknownErrors(t *testing.T) {
+	m := newTestManager(t, newFakeStore(), 1000)
+	if err := m.Offload("ghost"); err == nil {
+		t.Fatal("offload of a name in neither cache nor library should error, not silently succeed")
+	}
+}
+
+func TestOffload_AlreadyOffloadedIsNoop(t *testing.T) {
+	fs := newFakeStore()
+	fs.add("/lib/m", 10) // library only, already offloaded
+	m := newTestManager(t, fs, 1000)
+	if err := m.Offload("m"); err != nil {
+		t.Fatalf("offload of an already-offloaded model should be a no-op, got %v", err)
+	}
+}
+
 func TestPull_IsEnsurePulled(t *testing.T) {
 	fs := newFakeStore()
 	fs.add("/lib/m", 100)
