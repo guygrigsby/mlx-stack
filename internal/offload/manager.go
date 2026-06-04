@@ -98,3 +98,20 @@ func (m *Manager) Reconcile() error {
 }
 
 var _ = context.Background // context used by later methods in this package
+
+// CacheUsed returns the total bytes of all model dirs in the cache root.
+func (m *Manager) CacheUsed() (int64, error) {
+	names, err := m.opt.FS.List(m.opt.CacheRoot)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, name := range names {
+		s, err := m.opt.FS.Size(m.cachePath(name))
+		if err != nil {
+			return 0, err
+		}
+		total += s
+	}
+	return total, nil
+}
