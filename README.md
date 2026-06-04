@@ -66,6 +66,17 @@ grace_sec          = 90
 [defaults.memlog]
 interval_sec = 300
 
+# Optional two-tier storage. external_root is the durable model library;
+# models_root above becomes a budgeted SSD cache. Loading a model that's only
+# in the library auto-pulls it to the cache, evicting least-recently-used
+# models back to the library to stay under local_budget_bytes. Omit this
+# section for single-tier behavior (everything in models_root). Manage tiers
+# with `mlxctl offload <model>` / `mlxctl pull <model>`; `mlxctl offload
+# --inactive` sweeps cached models not referenced by the config to the library.
+[offload]
+external_root      = "/Volumes/weights-data/mlx-models"
+local_budget_bytes = 400_000_000_000
+
 # Chat group: 1 port, 3 swappable models.
 [[backend]]
 name    = "valkyrie"
