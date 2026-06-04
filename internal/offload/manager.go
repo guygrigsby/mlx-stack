@@ -97,8 +97,6 @@ func (m *Manager) Reconcile() error {
 	return nil
 }
 
-var _ = context.Background // context used by later methods in this package
-
 // CacheUsed returns the total bytes of all model dirs in the cache root.
 func (m *Manager) CacheUsed() (int64, error) {
 	names, err := m.opt.FS.List(m.opt.CacheRoot)
@@ -114,4 +112,88 @@ func (m *Manager) CacheUsed() (int64, error) {
 		total += s
 	}
 	return total, nil
+}
+
+// EnsurePulled makes model `name` present in the cache so the supervisor can
+// load it from CacheRoot/name. Hot/local-only: touch LRU and return. Offloaded:
+// evict LRU hot models to fit the budget, then copy from the library. Errors if
+// the model is unknown, or offloaded while the drive is unmounted, or the cache
+// budget cannot fit it because every other cached model is pinned.
+func (m *Manager) EnsurePulled(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.opt.FS.Exists(m.cachePath(name)) {
+		m.lastUsed[name] = time.Now()
+		m.save()
+		return nil
+	}
+	if !m.opt.FS.Exists(m.libPath(name)) {
+		return fmt.Errorf("unknown model %q (not in cache or library)", name)
+	}
+	if !m.opt.FS.Mounted(m.opt.LibraryRoot) {
+		return fmt.Errorf("model %q is offloaded but the external drive is not mounted", name)
+	}
+	need, err := m.opt.FS.Size(m.libPath(name))
+	if err != nil {
+		return err
+	}
+	if err := m.ensureRoom(need, name); err != nil {
+		return err
+	}
+	if err := m.opt.FS.CopyDir(m.libPath(name), m.cachePath(name)); err != nil {
+		return fmt.Errorf("pull %q: %w", name, err)
+	}
+	m.lastUsed[name] = time.Now()
+	m.save()
+	return nil
+}
+
+// ensureRoom evicts least-recently-used evictable models until `need` bytes fit
+// under the budget. keep is never evicted. Caller holds mu.
+func (m *Manager) ensureRoom(need int64, keep string) error {
+	if m.opt.Budget <= 0 {
+		return nil
+	}
+	used, err := m.CacheUsed()
+	if err != nil {
+		return err
+	}
+	pinned := m.opt.Pinned()
+	for used+need > m.opt.Budget {
+		victim := m.lruEvictable(keep, pinned)
+		if victim == "" {
+			return fmt.Errorf("cannot fit %q in cache budget (all cached models are pinned)", keep)
+		}
+		sz, err := m.opt.FS.Size(m.cachePath(victim))
+		if err != nil {
+			return err
+		}
+		if err := m.opt.FS.RemoveDir(m.cachePath(victim)); err != nil {
+			return err
+		}
+		used -= sz
+	}
+	return nil
+}
+
+// lruEvictable returns the least-recently-used cached model that is safe to
+// evict: tier hot (a library copy exists), not pinned, not keep. "" if none.
+func (m *Manager) lruEvictable(keep string, pinned map[string]bool) string {
+	var best string
+	var bestT time.Time
+	names, _ := m.opt.FS.List(m.opt.CacheRoot)
+	for _, name := range names {
+		if name == keep || pinned[name] {
+			continue
+		}
+		if !m.opt.FS.Exists(m.libPath(name)) {
+			continue
+		}
+		t := m.lastUsed[name]
+		if best == "" || t.Before(bestT) {
+			best, bestT = name, t
+		}
+	}
+	return best
 }
