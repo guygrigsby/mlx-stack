@@ -53,6 +53,7 @@ type backendStatusJSON struct {
 	Model       string `json:"model"`
 	PID         int    `json:"pid"`
 	CurrentName string `json:"current_name"`
+	Tier        string `json:"tier"`
 }
 
 type workerObsJSON struct {
@@ -77,9 +78,11 @@ type routerJSON struct {
 }
 
 type statusJSON struct {
-	Router   routerJSON               `json:"router"`
-	Backends []backendStatusJSON      `json:"backends"`
-	Workers  map[string]workerObsJSON `json:"workers"`
+	Router           routerJSON               `json:"router"`
+	Backends         []backendStatusJSON      `json:"backends"`
+	Workers          map[string]workerObsJSON `json:"workers"`
+	CacheUsedBytes   int64                    `json:"cache_used_bytes"`
+	CacheBudgetBytes int64                    `json:"cache_budget_bytes"`
 }
 
 func renderStatus(w io.Writer, body []byte) {
@@ -110,7 +113,7 @@ func renderStatus(w io.Writer, body []byte) {
 	if color {
 		runHdr = ansiDefault + runHdr + ansiReset
 	}
-	fmt.Fprintf(tw, "NAME\tGROUP\tMODE\tENGINE\tMODEL\tURL\t%s\tPID\tCURRENT\tMEM(active/cache/peak)\tLAST TIMING\n", runHdr)
+	fmt.Fprintf(tw, "NAME\tGROUP\tMODE\tENGINE\tMODEL\tURL\t%s\tPID\tCURRENT\tTIER\tMEM(active/cache/peak)\tLAST TIMING\n", runHdr)
 	names := make([]string, 0, len(s.Backends))
 	idx := map[string]backendStatusJSON{}
 	for _, b := range s.Backends {
@@ -168,10 +171,18 @@ func renderStatus(w io.Writer, body []byte) {
 		if b.Mode == "swap" {
 			group = b.Group
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			b.Name, group, b.Mode, b.Engine, shortModel(b.Model), b.URL, running, b.PID, current, mem, tim)
+		tier := b.Tier
+		if tier == "" {
+			tier = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			b.Name, group, b.Mode, b.Engine, shortModel(b.Model), b.URL, running, b.PID, current, tier, mem, tim)
 	}
 	tw.Flush()
+
+	if s.CacheBudgetBytes > 0 {
+		fmt.Fprintf(w, "\nCACHE  %s / %s\n", humanBytes(s.CacheUsedBytes), humanBytes(s.CacheBudgetBytes))
+	}
 }
 
 // shortModel trims a local model directory to its last path segment (the model

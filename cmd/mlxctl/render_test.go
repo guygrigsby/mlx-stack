@@ -38,6 +38,19 @@ func TestRenderStatus_WedgedShowsUnhealthy(t *testing.T) {
 	}
 }
 
+func TestRenderStatus_ShowsTier(t *testing.T) {
+	body := []byte(`{
+		"backends": [
+			{"name":"chat","group":"chat","mode":"swap","engine":"lm","url":"http://x:1234","running":true,"state":"ready","pid":100,"current_name":"valkyrie","tier":"offloaded"}
+		]
+	}`)
+	var b bytes.Buffer
+	renderStatus(&b, body)
+	if !strings.Contains(b.String(), "offloaded") {
+		t.Errorf("tier not rendered: %s", b.String())
+	}
+}
+
 func TestHumanBytes(t *testing.T) {
 	cases := []struct {
 		in   int64

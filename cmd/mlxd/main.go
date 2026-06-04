@@ -186,6 +186,7 @@ func newRunCmd() *cobra.Command {
 			}
 			if offloadMgr != nil {
 				handlers.Offloader = offloadMgr
+				handlers.Tierer = offloadMgr
 			}
 			handlers.SetState(backends, aliases)
 			live.admin = handlers

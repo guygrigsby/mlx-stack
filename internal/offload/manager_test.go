@@ -69,6 +69,15 @@ func TestManager_Tier(t *testing.T) {
 	}
 }
 
+func TestManager_TierName(t *testing.T) {
+	fs := newFakeStore()
+	fs.add("/lib/m", 10)
+	m := newTestManager(t, fs, 1000)
+	if m.TierName("m") != "offloaded" {
+		t.Errorf("TierName = %q", m.TierName("m"))
+	}
+}
+
 func TestEnsurePulled_HotTouchesNoCopy(t *testing.T) {
 	fs := newFakeStore()
 	fs.add("/cache/m", 10)

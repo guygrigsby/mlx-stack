@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,9 @@ type Handlers struct {
 
 	// Offloader, when set, enables POST /v1/offload and /v1/pull.
 	Offloader Offloader
+
+	// Tierer, when set, adds model tier + cache usage to status.
+	Tierer Tierer
 
 	// backends and aliases are the live view of registered backends. A hot
 	// reload grows them via SetState while request handlers read them, so they
@@ -68,12 +72,15 @@ type BackendStatus struct {
 	Model       string `json:"model,omitempty"`
 	PID         int    `json:"pid"`
 	CurrentName string `json:"current_name,omitempty"`
+	Tier        string `json:"tier,omitempty"`
 }
 
 type StatusResponse struct {
-	Router   RouterInfo                    `json:"router"`
-	Backends []BackendStatus               `json:"backends"`
-	Workers  map[string]obsstate.WorkerObs `json:"workers,omitempty"`
+	Router           RouterInfo                    `json:"router"`
+	Backends         []BackendStatus               `json:"backends"`
+	Workers          map[string]obsstate.WorkerObs `json:"workers,omitempty"`
+	CacheUsedBytes   int64                         `json:"cache_used_bytes,omitempty"`
+	CacheBudgetBytes int64                         `json:"cache_budget_bytes,omitempty"`
 }
 
 type RouterInfo struct {
@@ -112,6 +119,14 @@ type readinessChecker interface {
 type Offloader interface {
 	Offload(name string) error
 	Pull(ctx context.Context, name string) error
+}
+
+// Tierer exposes model tier + cache accounting for status. *offload.Manager
+// satisfies it via TierName/CacheUsed/Budget.
+type Tierer interface {
+	TierName(name string) string
+	CacheUsed() (int64, error)
+	Budget() int64
 }
 
 // readinessProbeTimeout bounds each live probe so a wedged backend can't make
@@ -226,9 +241,18 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 		if cn, ok := b.(currentNameAccessor); ok {
 			s.CurrentName = cn.Current()
 		}
+		if h.Tierer != nil && b.UpstreamModel() != "" {
+			s.Tier = h.Tierer.TierName(filepath.Base(b.UpstreamModel()))
+		}
 		statuses = append(statuses, s)
 	}
 	resp := StatusResponse{Backends: statuses}
+	if h.Tierer != nil {
+		if used, err := h.Tierer.CacheUsed(); err == nil {
+			resp.CacheUsedBytes = used
+			resp.CacheBudgetBytes = h.Tierer.Budget()
+		}
+	}
 	if h.Config != nil {
 		resp.Router = RouterInfo{
 			Host:       h.Config.Router.Host,

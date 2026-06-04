@@ -230,6 +230,12 @@ func (m *Manager) Pull(ctx context.Context, name string) error {
 	return m.EnsurePulled(ctx, name)
 }
 
+// TierName is a string-typed accessor for callers that must not import the Tier type.
+func (m *Manager) TierName(name string) string { return string(m.Tier(name)) }
+
+// Budget returns the configured cache budget in bytes (0 = unbounded).
+func (m *Manager) Budget() int64 { return m.opt.Budget }
+
 // SetPinned replaces the function reporting model names that must not be evicted.
 func (m *Manager) SetPinned(f func() map[string]bool) {
 	m.mu.Lock()
