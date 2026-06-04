@@ -153,3 +153,56 @@ func TestEnsurePulled_DriveAbsentErrors(t *testing.T) {
 		t.Fatal("offloaded + unmounted drive should error")
 	}
 }
+
+func TestOffload_HotDeletesCacheKeepsLibrary(t *testing.T) {
+	fs := newFakeStore()
+	fs.add("/cache/m", 10)
+	fs.add("/lib/m", 10)
+	m := newTestManager(t, fs, 1000)
+	if err := m.Offload("m"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("/cache/m") || !fs.Exists("/lib/m") {
+		t.Fatalf("offload should drop cache, keep library")
+	}
+}
+
+func TestOffload_LocalOnlyBacksUpFirst(t *testing.T) {
+	fs := newFakeStore()
+	fs.add("/cache/m", 10)
+	m := newTestManager(t, fs, 1000)
+	if err := m.Offload("m"); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Exists("/lib/m") {
+		t.Fatal("local-only offload must copy to library before deleting cache")
+	}
+	if fs.Exists("/cache/m") {
+		t.Fatal("cache copy should be removed after backup")
+	}
+}
+
+func TestOffload_DriveAbsentErrors(t *testing.T) {
+	fs := newFakeStore()
+	fs.add("/cache/m", 10)
+	fs.mounted["/lib"] = false
+	m := newTestManager(t, fs, 1000)
+	if err := m.Offload("m"); err == nil {
+		t.Fatal("offload with unmounted drive should error")
+	}
+	if !fs.Exists("/cache/m") {
+		t.Fatal("cache must be untouched when offload cannot proceed")
+	}
+}
+
+func TestPull_IsEnsurePulled(t *testing.T) {
+	fs := newFakeStore()
+	fs.add("/lib/m", 100)
+	m := newTestManager(t, fs, 1000)
+	if err := m.Pull(context.Background(), "m"); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Exists("/cache/m") {
+		t.Fatal("pull should materialize the cache copy")
+	}
+}

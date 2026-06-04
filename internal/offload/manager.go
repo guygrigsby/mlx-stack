@@ -197,3 +197,35 @@ func (m *Manager) lruEvictable(keep string, pinned map[string]bool) string {
 	}
 	return best
 }
+
+// Offload ensures a library copy exists, then removes the cache copy. A
+// local-only model is copied to the library first so its only copy is never
+// destroyed. No-op if the model is not in the cache. Errors if the drive is
+// unmounted (the library copy cannot be guaranteed).
+func (m *Manager) Offload(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.opt.FS.Exists(m.cachePath(name)) {
+		return nil
+	}
+	if !m.opt.FS.Mounted(m.opt.LibraryRoot) {
+		return fmt.Errorf("cannot offload %q: external drive not mounted", name)
+	}
+	if !m.opt.FS.Exists(m.libPath(name)) {
+		if err := m.opt.FS.CopyDir(m.cachePath(name), m.libPath(name)); err != nil {
+			return fmt.Errorf("back up %q to library: %w", name, err)
+		}
+	}
+	if err := m.opt.FS.RemoveDir(m.cachePath(name)); err != nil {
+		return err
+	}
+	delete(m.lastUsed, name)
+	m.save()
+	return nil
+}
+
+// Pull pre-warms a model into the cache (same flow as a load).
+func (m *Manager) Pull(ctx context.Context, name string) error {
+	return m.EnsurePulled(ctx, name)
+}
