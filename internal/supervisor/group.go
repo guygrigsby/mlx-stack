@@ -20,6 +20,11 @@ type GroupOpts struct {
 	SwapTimeoutSec int
 	ProbeInterval  time.Duration
 	WorkerFactory  func(spec config.BackendSpec) *Worker
+
+	// BeforeLoad, if set, runs just before a member's worker is spawned (after
+	// the lock is held and the member is resolved). A non-nil error aborts the
+	// load. mlxd uses it to pull the model into the SSD cache (offload).
+	BeforeLoad func(ctx context.Context, spec config.BackendSpec) error
 }
 
 type Group struct {
@@ -183,6 +188,12 @@ func (g *Group) EnsureLoaded(ctx context.Context, name string) error {
 
 	if g.current == name && g.worker != nil {
 		return nil
+	}
+
+	if g.opts.BeforeLoad != nil {
+		if err := g.opts.BeforeLoad(ctx, spec); err != nil {
+			return fmt.Errorf("before-load group[%s] member[%s]: %w", g.opts.Name, name, err)
+		}
 	}
 
 	// Kill old worker

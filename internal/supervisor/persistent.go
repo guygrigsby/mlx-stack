@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/guygrigsby/mlx-stack/internal/backend"
+	"github.com/guygrigsby/mlx-stack/internal/config"
 )
 
 type PersistentOpts struct {
@@ -16,6 +17,8 @@ type PersistentOpts struct {
 	Host          string
 	Port          int
 	UpstreamModel string
+	Model         string
+	DraftModel    string
 	Args          []string
 	Env           []string
 	ProbeInterval time.Duration
@@ -23,6 +26,11 @@ type PersistentOpts struct {
 	BackoffMin    time.Duration
 	BackoffMax    time.Duration
 	WorkerFactory func(args []string) *Worker
+
+	// BeforeLoad, if set, runs just before the worker is spawned. A non-nil
+	// error aborts the load. mlxd uses it to pull the model into the SSD cache
+	// (offload).
+	BeforeLoad func(ctx context.Context, spec config.BackendSpec) error
 }
 
 // phase is the load lifecycle of a persistent backend.
@@ -151,6 +159,22 @@ func (p *Persistent) Start(ctx context.Context) error {
 	p.stopCh = make(chan struct{})
 	p.doneCh = make(chan struct{})
 	ch := p.readyCh
+	p.mu.Unlock()
+
+	// Run the pre-spawn hook (e.g. pull the model into the SSD cache) before
+	// the worker is created. A non-nil error aborts the load: revert to stopped
+	// and surface the error the same way a failed spawn does, without spawning.
+	if p.opts.BeforeLoad != nil {
+		spec := config.BackendSpec{Name: p.opts.Name, Engine: p.opts.Engine, Model: p.opts.Model, DraftModel: p.opts.DraftModel}
+		if err := p.opts.BeforeLoad(ctx, spec); err != nil {
+			p.mu.Lock()
+			p.ph = phaseStopped
+			p.mu.Unlock()
+			return fmt.Errorf("before-load %s: %w", p.opts.Name, err)
+		}
+	}
+
+	p.mu.Lock()
 	w := p.opts.WorkerFactory(p.opts.Args)
 	p.mu.Unlock()
 

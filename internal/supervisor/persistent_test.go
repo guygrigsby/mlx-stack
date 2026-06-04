@@ -2,12 +2,73 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/guygrigsby/mlx-stack/internal/config"
 )
+
+func TestPersistent_BeforeLoadRunsBeforeSpawn(t *testing.T) {
+	var started int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	defer upstream.Close()
+	port, _ := freePort()
+	var called bool
+	p := NewPersistent(PersistentOpts{
+		Name: "tags", Engine: "vlm", Host: "127.0.0.1", Port: port,
+		ProbeInterval: 20 * time.Millisecond, ProbeTimeout: 5 * time.Second,
+		BackoffMin: 50 * time.Millisecond, BackoffMax: 200 * time.Millisecond,
+		WorkerFactory: func(args []string) *Worker {
+			atomic.AddInt32(&started, 1)
+			return New(WorkerSpec{Name: "tags", Command: "/bin/sh", Args: []string{"-c", "sleep 2"}})
+		},
+		BeforeLoad: func(ctx context.Context, spec config.BackendSpec) error {
+			called = true
+			if atomic.LoadInt32(&started) != 0 {
+				t.Error("BeforeLoad must run before spawn")
+			}
+			return nil
+		},
+	})
+	p.upstreamURLOverride = upstream.URL
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop(context.Background())
+	if !called {
+		t.Error("BeforeLoad was not called")
+	}
+}
+
+func TestPersistent_BeforeLoadErrorAbortsLoad(t *testing.T) {
+	var started int32
+	port, _ := freePort()
+	p := NewPersistent(PersistentOpts{
+		Name: "tags", Engine: "vlm", Host: "127.0.0.1", Port: port,
+		ProbeInterval: 20 * time.Millisecond, ProbeTimeout: 5 * time.Second,
+		BackoffMin: 50 * time.Millisecond, BackoffMax: 200 * time.Millisecond,
+		WorkerFactory: func(args []string) *Worker {
+			atomic.AddInt32(&started, 1)
+			return New(WorkerSpec{Name: "tags", Command: "/bin/sh", Args: []string{"-c", "sleep 2"}})
+		},
+		BeforeLoad: func(ctx context.Context, spec config.BackendSpec) error {
+			return fmt.Errorf("pull failed")
+		},
+	})
+	if err := p.Start(context.Background()); err == nil {
+		t.Fatal("BeforeLoad error should abort the load")
+	}
+	if atomic.LoadInt32(&started) != 0 {
+		t.Error("no worker should spawn when BeforeLoad fails")
+	}
+}
 
 func TestPersistent_StartProbesUntilReady(t *testing.T) {
 	var started int32

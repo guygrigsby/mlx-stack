@@ -41,6 +41,45 @@ func newTestGroup(t *testing.T) (*Group, *int32) {
 	return g, &started
 }
 
+func TestGroup_BeforeLoadRunsBeforeSpawn(t *testing.T) {
+	g, started := newTestGroup(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	g.upstreamURLOverride = upstream.URL
+
+	var calledWith string
+	g.opts.BeforeLoad = func(ctx context.Context, spec config.BackendSpec) error {
+		calledWith = spec.Name
+		if atomic.LoadInt32(started) != 0 {
+			t.Error("BeforeLoad must run before the worker is spawned")
+		}
+		return nil
+	}
+	if err := g.EnsureLoaded(context.Background(), "p1"); err != nil {
+		t.Fatal(err)
+	}
+	defer g.Stop(context.Background())
+	if calledWith != "p1" {
+		t.Errorf("BeforeLoad got %q, want p1", calledWith)
+	}
+}
+
+func TestGroup_BeforeLoadErrorAbortsLoad(t *testing.T) {
+	g, started := newTestGroup(t)
+	g.opts.BeforeLoad = func(ctx context.Context, spec config.BackendSpec) error {
+		return fmt.Errorf("pull failed")
+	}
+	if err := g.EnsureLoaded(context.Background(), "p1"); err == nil {
+		t.Fatal("BeforeLoad error should abort the load")
+	}
+	if atomic.LoadInt32(started) != 0 {
+		t.Error("no worker should spawn when BeforeLoad fails")
+	}
+}
+
 func TestGroup_ReadyReflectsLiveUpstream(t *testing.T) {
 	g, _ := newTestGroup(t)
 
