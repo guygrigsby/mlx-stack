@@ -76,6 +76,8 @@ router over HTTP (override with MLXD_ROUTER).`,
 		newStatusCmd(),
 		newListCmd(),
 		newHealthCmd(),
+		newOffloadCmd(),
+		newPullCmd(),
 	)
 	grouped(grpModels,
 		newAddCmd(),
