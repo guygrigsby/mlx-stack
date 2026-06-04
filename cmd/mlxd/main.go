@@ -74,6 +74,12 @@ func newRunCmd() *cobra.Command {
 			obsStore := obsstate.New()
 			go obsStore.Run(context.Background(), broker)
 
+			// Two-tier offload manager (nil when [offload] is absent). State
+			// lives next to the admin socket. Pinned set is wired below, once
+			// the backends slice exists.
+			stateDir := filepath.Dir(socketPath)
+			offloadMgr := buildOffloadManager(cfg, stateDir)
+
 			// Shared deps for turning a BackendSpec into a running backend.
 			// Boot and hot reload both go through this builder so there is one
 			// construction path.
@@ -83,6 +89,7 @@ func newRunCmd() *cobra.Command {
 				defaults:  cfg.Defaults,
 				broker:    broker,
 				logger:    logger,
+				offload:   offloadMgr,
 			}
 
 			// Build all backends at boot.
@@ -152,6 +159,23 @@ func newRunCmd() *cobra.Command {
 				backends:    backends,
 				aliases:     aliases,
 				logger:      logger,
+			}
+
+			// Pin currently-loaded models so offload never evicts a model that
+			// is serving. Reads the live backend set (grows on hot reload) under
+			// its lock. Only meaningful when offload is enabled.
+			if offloadMgr != nil {
+				offloadMgr.SetPinned(func() map[string]bool {
+					out := map[string]bool{}
+					live.mu.Lock()
+					defer live.mu.Unlock()
+					for _, b := range live.backends {
+						if b.Running() && b.UpstreamModel() != "" {
+							out[filepath.Base(b.UpstreamModel())] = true
+						}
+					}
+					return out
+				})
 			}
 
 			handlers := &admin.Handlers{

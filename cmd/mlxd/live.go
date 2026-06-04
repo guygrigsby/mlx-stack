@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	bk "github.com/guygrigsby/mlx-stack/internal/backend"
 	"github.com/guygrigsby/mlx-stack/internal/config"
 	"github.com/guygrigsby/mlx-stack/internal/logobs"
+	"github.com/guygrigsby/mlx-stack/internal/offload"
 	"github.com/guygrigsby/mlx-stack/internal/router"
 	"github.com/guygrigsby/mlx-stack/internal/supervisor"
 )
@@ -25,6 +27,47 @@ type backendBuilder struct {
 	defaults  config.Defaults
 	broker    *logobs.Broker
 	logger    *slog.Logger
+	offload   *offload.Manager // nil when [offload] is absent (single-tier)
+}
+
+// buildOffloadManager returns a configured offload.Manager, or nil when
+// [offload] is absent (single-tier behavior). stateDir is mlxd's state dir.
+func buildOffloadManager(cfg *config.Config, stateDir string) *offload.Manager {
+	if cfg.Offload == nil {
+		return nil
+	}
+	m, err := offload.New(offload.Options{
+		CacheRoot:   cfg.ModelsRoot,
+		LibraryRoot: cfg.Offload.ExternalRoot,
+		Budget:      cfg.Offload.LocalBudgetBytes,
+		StatePath:   filepath.Join(stateDir, "offload.json"),
+		FS:          offload.OSStore{},
+		Pinned:      func() map[string]bool { return nil }, // replaced after registry is built
+	})
+	if err != nil {
+		slog.Error("offload: disabled", "err", err)
+		return nil
+	}
+	return m
+}
+
+// offloadBeforeLoad returns a BeforeLoad hook that pulls a backend's model (and
+// draft model) into the SSD cache before the worker spawns. nil manager => nil hook.
+func offloadBeforeLoad(m *offload.Manager) func(context.Context, config.BackendSpec) error {
+	if m == nil {
+		return nil
+	}
+	return func(ctx context.Context, spec config.BackendSpec) error {
+		for _, p := range []string{spec.Model, spec.DraftModel} {
+			if p == "" {
+				continue
+			}
+			if err := m.EnsurePulled(ctx, filepath.Base(p)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // newGroup builds a swap Group from its member specs. The default member is
@@ -48,6 +91,7 @@ func (bd *backendBuilder) newGroup(name string, members []config.BackendSpec) *s
 		DefaultMember:  defaultMember,
 		SwapTimeoutSec: 90,
 		ProbeInterval:  250 * time.Millisecond,
+		BeforeLoad:     offloadBeforeLoad(bd.offload),
 		WorkerFactory: func(spec config.BackendSpec) *supervisor.Worker {
 			return supervisor.New(supervisor.WorkerSpec{
 				Name:    fmt.Sprintf("%s[%s]", gName, spec.Name),
@@ -68,7 +112,10 @@ func (bd *backendBuilder) newPersistent(spec config.BackendSpec) *supervisor.Per
 		Host:          spec.Host,
 		Port:          spec.Port,
 		UpstreamModel: spec.Model,
+		Model:         spec.Model,
+		DraftModel:    spec.DraftModel,
 		Args:          launcherArgs(spec),
+		BeforeLoad:    offloadBeforeLoad(bd.offload),
 		WorkerFactory: func(args []string) *supervisor.Worker {
 			return supervisor.New(supervisor.WorkerSpec{
 				Name:    spec.Name,

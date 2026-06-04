@@ -137,6 +137,19 @@ func TestEnsurePulled_PinnedNotEvicted(t *testing.T) {
 	}
 }
 
+func TestManager_SetPinned(t *testing.T) {
+	fs := newFakeStore()
+	fs.add("/cache/p", 800)
+	fs.add("/lib/p", 800)
+	fs.add("/lib/new", 400)
+	m := newTestManager(t, fs, 1000)
+	m.lastUsed["p"] = time.Unix(1, 0)
+	m.SetPinned(func() map[string]bool { return map[string]bool{"p": true} })
+	if err := m.EnsurePulled(context.Background(), "new"); err == nil {
+		t.Fatal("pinned model (via SetPinned) must not be evicted")
+	}
+}
+
 func TestEnsurePulled_UnknownErrors(t *testing.T) {
 	m := newTestManager(t, newFakeStore(), 1000)
 	if err := m.EnsurePulled(context.Background(), "ghost"); err == nil {

@@ -156,6 +156,23 @@ func TestLiveReloadBadConfigNoMutation(t *testing.T) {
 	}
 }
 
+func TestBuildOffloadManager_NilWhenUnconfigured(t *testing.T) {
+	cfg := &config.Config{ModelsRoot: "/cache"}
+	if m := buildOffloadManager(cfg, t.TempDir()); m != nil {
+		t.Fatal("manager should be nil when [offload] is absent")
+	}
+}
+
+func TestBuildOffloadManager_BuiltWhenConfigured(t *testing.T) {
+	cfg := &config.Config{
+		ModelsRoot: t.TempDir(),
+		Offload:    &config.Offload{ExternalRoot: t.TempDir(), LocalBudgetBytes: 1 << 30},
+	}
+	if m := buildOffloadManager(cfg, t.TempDir()); m == nil {
+		t.Fatal("manager should be built when [offload] is set")
+	}
+}
+
 // adminNames pulls backend names out of the admin /v1/status view.
 func adminNames(h *admin.Handlers) []string {
 	req := httptest.NewRequest("GET", "/v1/status", nil)

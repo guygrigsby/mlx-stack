@@ -229,3 +229,12 @@ func (m *Manager) Offload(name string) error {
 func (m *Manager) Pull(ctx context.Context, name string) error {
 	return m.EnsurePulled(ctx, name)
 }
+
+// SetPinned replaces the function reporting model names that must not be evicted.
+func (m *Manager) SetPinned(f func() map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if f != nil {
+		m.opt.Pinned = f
+	}
+}
