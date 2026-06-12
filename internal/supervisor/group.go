@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,7 +223,7 @@ func (g *Group) EnsureLoaded(ctx context.Context, name string) error {
 	g.state.WorkerPID = w.PID()
 	g.state.WorkerURL = g.BaseURL()
 
-	if err := g.probeReady(ctx); err != nil {
+	if err := g.probeReady(ctx, w); err != nil {
 		_ = g.worker.Signal("KILL")
 		g.worker = nil
 		g.state.WorkerPID = 0
@@ -254,7 +255,7 @@ func (g *Group) watchExit(w *Worker) {
 	}()
 }
 
-func (g *Group) probeReady(ctx context.Context) error {
+func (g *Group) probeReady(ctx context.Context, w *Worker) error {
 	swapTimeout := time.Duration(g.opts.SwapTimeoutSec) * time.Second
 	deadline := time.Now().Add(swapTimeout)
 	probeURL := g.BaseURL() + "/v1/models"
@@ -266,6 +267,14 @@ func (g *Group) probeReady(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// A worker that exits during startup will never answer the probe. Bail
+		// out immediately with its own error instead of polling a dead port
+		// until the swap timeout and reporting a generic "not ready".
+		select {
+		case res := <-w.Done():
+			return workerExitErr(res, w)
+		default:
+		}
 		req, _ := http.NewRequestWithContext(ctx, "GET", probeURL, nil)
 		resp, err := client.Do(req)
 		if err == nil && resp.StatusCode == 200 {
@@ -275,9 +284,31 @@ func (g *Group) probeReady(ctx context.Context) error {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		time.Sleep(g.opts.ProbeInterval)
+		select {
+		case res := <-w.Done():
+			return workerExitErr(res, w)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(g.opts.ProbeInterval):
+		}
 	}
 	return fmt.Errorf("not ready within %s", swapTimeout)
+}
+
+// workerExitErr builds a readiness error from a worker that died during load,
+// carrying the exit code and a tail of its stderr so the real cause (e.g. an
+// unsupported model_type) reaches the caller instead of a generic timeout.
+func workerExitErr(res WorkerResult, w *Worker) error {
+	lines := w.StderrLines()
+	const n = 8
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	tail := strings.TrimSpace(strings.Join(lines, "; "))
+	if tail == "" {
+		tail = "(no stderr)"
+	}
+	return fmt.Errorf("worker exited during load (code %d): %s", res.ExitCode, tail)
 }
 
 func (g *Group) Start(ctx context.Context) error {

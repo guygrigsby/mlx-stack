@@ -80,6 +80,40 @@ func TestGroup_BeforeLoadErrorAbortsLoad(t *testing.T) {
 	}
 }
 
+// A worker that crashes during startup must fail the load immediately with its
+// own error, not poll a dead port until the swap timeout and return a generic
+// "not ready" that hides the captured stderr.
+func TestGroup_EnsureLoadedFailsFastWhenWorkerExits(t *testing.T) {
+	g, _ := newTestGroup(t)
+	// No upstream server is wired up, so /v1/models never answers. The worker
+	// writes a startup error to stderr and exits 1 — like an unsupported model.
+	g.opts.WorkerFactory = func(spec config.BackendSpec) *Worker {
+		return New(WorkerSpec{
+			Name:    "chat[" + spec.Name + "]",
+			Command: "/bin/sh",
+			Args:    []string{"-c", "echo 'ValueError: Model type diffusion_gemma not supported' >&2; exit 1"},
+		})
+	}
+
+	start := time.Now()
+	err := g.EnsureLoaded(context.Background(), "p1")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("EnsureLoaded should fail when the worker exits during startup")
+	}
+	// SwapTimeoutSec is 5s in the harness; fail-fast must return well before it.
+	if elapsed > 2*time.Second {
+		t.Errorf("EnsureLoaded blocked %v; should fail fast on worker exit, not poll to swap timeout", elapsed)
+	}
+	if !strings.Contains(err.Error(), "diffusion_gemma") {
+		t.Errorf("error should surface the worker's stderr, got: %v", err)
+	}
+	if g.Running() {
+		t.Error("group should not report Running after a failed load")
+	}
+}
+
 func TestGroup_ReadyReflectsLiveUpstream(t *testing.T) {
 	g, _ := newTestGroup(t)
 
