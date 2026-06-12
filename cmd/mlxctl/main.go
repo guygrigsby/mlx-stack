@@ -12,6 +12,15 @@ import (
 )
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the full command tree. Separate from main so tests can
+// execute commands and inspect error behavior.
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "mlxctl",
 		Short: "Control mlxd: status, swap models, send requests, manage backends",
@@ -36,6 +45,9 @@ Common workflow:
 mlxctl talks to mlxd over a unix socket (override with MLXD_SOCK) and to the
 router over HTTP (override with MLXD_ROUTER).`,
 		SilenceUsage: true,
+		// main() prints the error Execute returns; without this cobra prints
+		// it too and every failure shows up twice.
+		SilenceErrors: true,
 	}
 
 	// Output format is global so every command (and future ones) can honor
@@ -93,10 +105,7 @@ router over HTTP (override with MLXD_ROUTER).`,
 		newMonitorCmd(),
 		newTailCmd(),
 	)
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return root
 }
 
 func newClient() *ipc.Client {

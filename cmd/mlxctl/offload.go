@@ -83,8 +83,12 @@ func newOffloadCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "offload [model]",
 		Short: "Move a model to the external library, freeing SSD cache",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if inactive {
+				if len(args) > 0 {
+					return fmt.Errorf("offload: pass a model or --inactive, not both")
+				}
 				cfg := loadCfg()
 				dirs, err := cacheDirNames(cfg)
 				if err != nil {
@@ -102,8 +106,8 @@ func newOffloadCmd() *cobra.Command {
 				}
 				return nil
 			}
-			if len(args) != 1 {
-				return fmt.Errorf("usage: mlxctl offload <model> | --inactive")
+			if len(args) == 0 {
+				return fmt.Errorf("offload: requires a model name (or --inactive)")
 			}
 			name := resolveModelName(loadCfg(), args[0])
 			if err := postName("/v1/offload", name); err != nil {

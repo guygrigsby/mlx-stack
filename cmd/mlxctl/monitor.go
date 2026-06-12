@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -28,7 +27,9 @@ func newMonitorCmd() *cobra.Command {
 				default:
 				}
 
-				b, err := c.Get(context.Background(), "/v1/status")
+				cx, cancel := ctx()
+				b, err := c.Get(cx, "/v1/status")
+				cancel()
 				if err != nil {
 					return notRunning()
 				}

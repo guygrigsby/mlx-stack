@@ -279,7 +279,8 @@ func newTagsCmd() *cobra.Command {
 		Use:   "tags",
 		Short: "List model IDs the router serves (GET /v1/models)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(routerURL() + "/v1/models")
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Get(routerURL() + "/v1/models")
 			if err != nil {
 				return err
 			}

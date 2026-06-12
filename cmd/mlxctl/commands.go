@@ -114,8 +114,10 @@ func newStartCmd() *cobra.Command {
 		Short: "Start or load a backend (a group name loads its default member, e.g. 'start chat')",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cx, cancel := ctx()
+			defer cancel()
 			body, _ := json.Marshal(map[string]string{"name": args[0]})
-			resp, err := newClient().PostJSON(context.Background(), "/v1/start", body)
+			resp, err := newClient().PostJSON(cx, "/v1/start", body)
 			if err != nil {
 				return fmt.Errorf("start failed: %v\n%s", err, resp)
 			}
@@ -216,8 +218,10 @@ func newRestartCmd() *cobra.Command {
 		Short: "Stop then start a backend",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cx, cancel := ctx()
+			defer cancel()
 			body, _ := json.Marshal(map[string]string{"name": args[0]})
-			resp, err := newClient().PostJSON(context.Background(), "/v1/restart", body)
+			resp, err := newClient().PostJSON(cx, "/v1/restart", body)
 			if err != nil {
 				return fmt.Errorf("restart failed: %v\n%s", err, resp)
 			}
@@ -232,8 +236,10 @@ func newSwapCmd() *cobra.Command {
 		Short: "Load a swap-group member by name, evicting the current one (alias for start)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cx, cancel := ctx()
+			defer cancel()
 			body, _ := json.Marshal(map[string]string{"name": args[0]})
-			resp, err := newClient().PostJSON(context.Background(), "/v1/swap", body)
+			resp, err := newClient().PostJSON(cx, "/v1/swap", body)
 			if err != nil {
 				return fmt.Errorf("swap failed: %v\n%s", err, resp)
 			}
