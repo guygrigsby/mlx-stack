@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
+	"os"
 	"syscall"
 
 	"github.com/guygrigsby/mlx-stack/internal/ipc"
@@ -43,11 +43,7 @@ func isDaemonDown(err error) bool {
 }
 
 func printReload(res reloadResult) {
-	if len(res.Added) == 0 {
-		fmt.Println("reloaded mlxd (no new backends)")
-		return
-	}
-	fmt.Printf("reloaded mlxd (added: %s)\n", strings.Join(res.Added, ", "))
+	renderReload(os.Stdout, res, outputJSON())
 }
 
 func newReloadCmd() *cobra.Command {
@@ -102,7 +98,7 @@ func newHealthCmd() *cobra.Command {
 			if err != nil {
 				return notRunning()
 			}
-			fmt.Println(string(b))
+			renderHealth(os.Stdout, b, outputJSON())
 			return nil
 		},
 	}
@@ -147,17 +143,21 @@ func newStopCmd() *cobra.Command {
 			cx, cancel := ctx()
 			defer cancel()
 
-			failed := 0
+			var stopped, failed []string
 			for _, name := range args {
 				if resp, err := stopBackend(cx, c, name); err != nil {
-					failed++
-					fmt.Printf("stop %s: failed: %v\n%s\n", name, err, resp)
+					failed = append(failed, name)
+					fmt.Fprintf(os.Stderr, "stop %s: failed: %v\n%s\n", name, err, resp)
 					continue
 				}
-				fmt.Printf("stopped %s\n", name)
+				stopped = append(stopped, name)
+				if !outputJSON() {
+					fmt.Printf("stopped %s\n", name)
+				}
 			}
-			if failed > 0 {
-				return fmt.Errorf("%d backend(s) failed to stop", failed)
+			renderStopResult(os.Stdout, stopped, failed, outputJSON())
+			if len(failed) > 0 {
+				return fmt.Errorf("%d backend(s) failed to stop", len(failed))
 			}
 			return nil
 		},
@@ -189,25 +189,28 @@ func stopAll() error {
 		return fmt.Errorf("parse status: %w", err)
 	}
 
-	stopped, failed := 0, 0
+	var stopped, failed []string
 	for _, b := range s.Backends {
 		if !b.Running || b.Mode == "external" {
 			continue
 		}
 		if resp, err := stopBackend(cx, c, b.Name); err != nil {
-			failed++
-			fmt.Printf("stop %s: failed: %v\n%s\n", b.Name, err, resp)
+			failed = append(failed, b.Name)
+			fmt.Fprintf(os.Stderr, "stop %s: failed: %v\n%s\n", b.Name, err, resp)
 			continue
 		}
-		stopped++
-		fmt.Printf("stopped %s\n", b.Name)
+		stopped = append(stopped, b.Name)
+		if !outputJSON() {
+			fmt.Printf("stopped %s\n", b.Name)
+		}
 	}
 
-	if stopped == 0 && failed == 0 {
+	if !outputJSON() && len(stopped) == 0 && len(failed) == 0 {
 		fmt.Println("no running backends")
 	}
-	if failed > 0 {
-		return fmt.Errorf("%d backend(s) failed to stop", failed)
+	renderStopResult(os.Stdout, stopped, failed, outputJSON())
+	if len(failed) > 0 {
+		return fmt.Errorf("%d backend(s) failed to stop", len(failed))
 	}
 	return nil
 }

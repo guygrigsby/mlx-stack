@@ -282,15 +282,7 @@ func newTagsCmd() *cobra.Command {
 			}
 			defer resp.Body.Close()
 			body, _ := io.ReadAll(resp.Body)
-			var list struct {
-				Data []struct {
-					ID string `json:"id"`
-				} `json:"data"`
-			}
-			json.Unmarshal(body, &list)
-			for _, m := range list.Data {
-				fmt.Println(m.ID)
-			}
+			renderModelIDs(os.Stdout, body, outputJSON())
 			return nil
 		},
 	}

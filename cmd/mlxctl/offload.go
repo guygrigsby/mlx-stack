@@ -95,13 +95,23 @@ func newOffloadCmd() *cobra.Command {
 					return err
 				}
 				targets := inactiveModels(cfg, dirs)
+				var offloaded []string
 				for _, name := range targets {
 					if err := postName("/v1/offload", name); err != nil {
 						return fmt.Errorf("offload %s: %w", name, err)
 					}
-					fmt.Println("offloaded", name)
+					offloaded = append(offloaded, name)
+					if !outputJSON() {
+						fmt.Println("offloaded", name)
+					}
 				}
-				if len(targets) == 0 {
+				if outputJSON() {
+					if offloaded == nil {
+						offloaded = []string{}
+					}
+					b, _ := json.Marshal(map[string][]string{"offloaded": offloaded})
+					fmt.Println(string(b))
+				} else if len(targets) == 0 {
 					fmt.Println("nothing to offload (no inactive cached models)")
 				}
 				return nil

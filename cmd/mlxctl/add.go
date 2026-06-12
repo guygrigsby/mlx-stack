@@ -196,11 +196,7 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 
-			type candidate struct {
-				path, name, engine string
-				inConfig           bool
-			}
-			var cands []candidate
+			var cands []scanCandidate
 			for _, e := range entries {
 				if !e.IsDir() {
 					continue
@@ -210,46 +206,60 @@ func newScanCmd() *cobra.Command {
 					continue
 				}
 				eng := detectEngine(p)
-				cands = append(cands, candidate{
-					path:     p,
-					name:     sanitizeName(e.Name()),
-					engine:   eng,
-					inConfig: registered[filepath.Clean(p)],
+				cands = append(cands, scanCandidate{
+					Path:     p,
+					Name:     sanitizeName(e.Name()),
+					Engine:   eng,
+					InConfig: registered[filepath.Clean(p)],
 				})
 			}
-			sort.Slice(cands, func(i, j int) bool { return cands[i].name < cands[j].name })
+			sort.Slice(cands, func(i, j int) bool { return cands[i].Name < cands[j].Name })
 
-			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tENGINE\tIN CONFIG\tPATH")
 			added := 0
-			for _, c := range cands {
-				inCfg := "yes"
-				if !c.inConfig {
-					inCfg = "no"
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.name, defaultStr(c.engine, "?"), inCfg, c.path)
-				if add && !c.inConfig {
-					if c.engine == "" {
-						fmt.Fprintf(os.Stderr, "skip %s: could not detect engine (config.json missing model_type?); add manually with --engine\n", c.name)
+			if add {
+				for i, c := range cands {
+					if c.InConfig {
 						continue
 					}
-					spec, err := buildSpec(c.path, c.path, c.name, c.engine, "", "", "127.0.0.1", 0, false, "", cfg)
+					if c.Engine == "" {
+						fmt.Fprintf(os.Stderr, "skip %s: could not detect engine (config.json missing model_type?); add manually with --engine\n", c.Name)
+						continue
+					}
+					spec, err := buildSpec(c.Path, c.Path, c.Name, c.Engine, "", "", "127.0.0.1", 0, false, "", cfg)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
+						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.Name, err)
 						continue
 					}
 					if err := validateNewBackend(spec); err != nil {
-						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
+						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.Name, err)
 						continue
 					}
 					if err := appendBackend(cfgPath, spec); err != nil {
-						fmt.Fprintf(os.Stderr, "skip %s: append: %v\n", c.name, err)
+						fmt.Fprintf(os.Stderr, "skip %s: append: %v\n", c.Name, err)
 						continue
 					}
 					added++
+					cands[i].InConfig = true
 					// Refresh local view so the next iteration sees this group's port for shared swap members.
 					cfg.Backends = append(cfg.Backends, spec)
 				}
+			}
+
+			if outputJSON() {
+				renderScanJSON(os.Stdout, cands)
+				if add {
+					fmt.Fprintf(os.Stderr, "added %d backend(s) to %s\n", added, cfgPath)
+				}
+				return nil
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tENGINE\tIN CONFIG\tPATH")
+			for _, c := range cands {
+				inCfg := "yes"
+				if !c.InConfig {
+					inCfg = "no"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.Name, defaultStr(c.Engine, "?"), inCfg, c.Path)
 			}
 			tw.Flush()
 			if add {
