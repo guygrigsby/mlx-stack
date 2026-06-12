@@ -163,41 +163,53 @@ func newChatCmd() *cobra.Command {
 			if model == "" {
 				return fmt.Errorf("no chat-capable backend found (need a swap-mode lm backend in config or running)")
 			}
-
-			msg := strings.Join(args, " ")
-			payload := map[string]any{
-				"model": model,
-				"messages": []map[string]string{
-					{"role": "user", "content": msg},
-				},
-				"stream": !noStream,
-			}
-			applySampler(payload, samplerFor(model))
-			if _, ok := payload["max_tokens"]; !ok {
-				payload["max_tokens"] = 512
-			}
-			body, _ := json.Marshal(payload)
-
-			resp, err := postChat(chatClient, routerURL()+"/v1/chat/completions", body)
-			if err != nil {
-				return fmt.Errorf("no response from %q (backend may be wedged; check `mlxctl status` and try `mlxctl restart %s`): %w", model, model, err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != 200 {
-				respBody, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
-			}
-
-			if noStream {
-				respBody, _ := io.ReadAll(resp.Body)
-				printNonStreamChat(respBody)
-				return nil
-			}
-			return streamChatSSE(resp.Body)
+			payload := buildChatPayload(model, strings.Join(args, " "), !noStream, samplerFor(model))
+			return sendChatCompletion(model, payload, noStream)
 		},
 	}
 	cmd.Flags().BoolVar(&noStream, "no-stream", false, "buffer the full reply instead of streaming tokens")
 	return cmd
+}
+
+// buildChatPayload assembles an OpenAI chat-completions request body. content is
+// either a plain prompt string or a multimodal parts array (see buildContent).
+// The backend's configured sampler is merged in, and max_tokens defaults to 512
+// when the sampler doesn't set it.
+func buildChatPayload(model string, content any, stream bool, sampler *config.Sampler) map[string]any {
+	payload := map[string]any{
+		"model": model,
+		"messages": []map[string]any{
+			{"role": "user", "content": content},
+		},
+		"stream": stream,
+	}
+	applySampler(payload, sampler)
+	if _, ok := payload["max_tokens"]; !ok {
+		payload["max_tokens"] = 512
+	}
+	return payload
+}
+
+// sendChatCompletion posts payload to the router's chat-completions endpoint and
+// renders the reply: streamed token deltas by default, or the buffered message
+// when noStream. model is used only for error messages.
+func sendChatCompletion(model string, payload map[string]any, noStream bool) error {
+	body, _ := json.Marshal(payload)
+	resp, err := postChat(chatClient, routerURL()+"/v1/chat/completions", body)
+	if err != nil {
+		return fmt.Errorf("no response from %q (backend may be wedged; check `mlxctl status` and try `mlxctl restart %s`): %w", model, model, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+	}
+	if noStream {
+		respBody, _ := io.ReadAll(resp.Body)
+		printNonStreamChat(respBody)
+		return nil
+	}
+	return streamChatSSE(resp.Body)
 }
 
 func printNonStreamChat(respBody []byte) {
@@ -210,6 +222,10 @@ func printNonStreamChat(respBody []byte) {
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil || len(parsed.Choices) == 0 {
 		fmt.Println(string(respBody))
+		return
+	}
+	if parsed.Choices[0].Message.Content == "" {
+		fmt.Fprintln(os.Stderr, "(no content returned; try a different --max-tokens)")
 		return
 	}
 	fmt.Println(parsed.Choices[0].Message.Content)
@@ -252,6 +268,8 @@ func streamChatSSE(r io.Reader) error {
 	}
 	if any {
 		fmt.Println()
+	} else {
+		fmt.Fprintln(os.Stderr, "(no content returned; try a different --max-tokens)")
 	}
 	return nil
 }
