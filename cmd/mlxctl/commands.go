@@ -68,18 +68,9 @@ func newReloadCmd() *cobra.Command {
 
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
-		Short: "Show all backend state",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return printStatus()
-		},
-	}
-}
-
-func newListCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List all configured backends (alias for status)",
+		Use:     "status",
+		Aliases: []string{"list"},
+		Short:   "Show all backend state",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return printStatus()
 		},
@@ -106,9 +97,10 @@ func newHealthCmd() *cobra.Command {
 
 func newStartCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "start <name>",
-		Short: "Start or load a backend (a group name loads its default member, e.g. 'start chat')",
-		Args:  cobra.ExactArgs(1),
+		Use:     "start <name>",
+		Aliases: []string{"swap"},
+		Short:   "Start or load a backend; a swap member evicts its group's current one (group name loads the default member)",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cx, cancel := ctx()
 			defer cancel()
@@ -227,24 +219,6 @@ func newRestartCmd() *cobra.Command {
 			resp, err := newClient().PostJSON(cx, "/v1/restart", body)
 			if err != nil {
 				return fmt.Errorf("restart failed: %v\n%s", err, resp)
-			}
-			return printStatus()
-		},
-	}
-}
-
-func newSwapCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "swap <name>",
-		Short: "Load a swap-group member by name, evicting the current one (alias for start)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			body, _ := json.Marshal(map[string]string{"name": args[0]})
-			resp, err := newClient().PostJSON(cx, "/v1/swap", body)
-			if err != nil {
-				return fmt.Errorf("swap failed: %v\n%s", err, resp)
 			}
 			return printStatus()
 		},

@@ -64,6 +64,29 @@ func TestConfigFlagIsPersistent(t *testing.T) {
 	}
 }
 
+// Old names keep working as cobra aliases of the canonical commands; the
+// duplicate command implementations are gone.
+func TestCommandAliases(t *testing.T) {
+	root := newRootCmd()
+	for alias, want := range map[string]string{
+		"tags":   "models",
+		"swap":   "start",
+		"list":   "status",
+		"models": "models",
+		"start":  "start",
+		"status": "status",
+	} {
+		cmd, _, err := root.Find([]string{alias})
+		if err != nil {
+			t.Errorf("%s: %v", alias, err)
+			continue
+		}
+		if cmd.Name() != want {
+			t.Errorf("%s resolved to %q, want %q", alias, cmd.Name(), want)
+		}
+	}
+}
+
 // The global --output validator must still run and reject bad values.
 func TestRootCmd_RejectsBadOutputFormat(t *testing.T) {
 	root := newRootCmd()

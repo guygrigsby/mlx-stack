@@ -36,11 +36,12 @@ mlxd runs models as backends in one of two modes:
 
 Common workflow:
 
-  mlxctl list                    backends and which swap member is loaded
+  mlxctl status                  backends and which swap member is loaded
   mlxctl scan                    model checkpoints on disk (--add registers them)
   mlxctl add <path-or-hf-repo>   register a backend (downloads HF repos)
-  mlxctl swap <name>             load a swap member, evicting the current one
+  mlxctl start <name>            load a backend or swap member (alias: swap)
   mlxctl chat "hello"            chat with the loaded chat model
+  mlxctl run <model> "..."       run a prompt against any lm/vlm backend
 
 mlxctl talks to mlxd over a unix socket (override with MLXD_SOCK) and to the
 router over HTTP (override with MLXD_ROUTER). The config file defaults to
@@ -87,9 +88,7 @@ is honored for back-compat).`,
 		newStartCmd(),
 		newStopCmd(),
 		newRestartCmd(),
-		newSwapCmd(),
 		newStatusCmd(),
-		newListCmd(),
 		newHealthCmd(),
 		newOffloadCmd(),
 		newPullCmd(),
@@ -100,7 +99,7 @@ is honored for back-compat).`,
 		newReloadCmd(),
 		newChatCmd(),
 		newRunCmd(),
-		newTagsCmd(),
+		newModelsCmd(),
 		newConfigCmd(),
 		newBootstrapCmd(),
 	)

@@ -270,10 +270,11 @@ func streamChatSSE(r io.Reader) error {
 	return nil
 }
 
-func newTagsCmd() *cobra.Command {
+func newModelsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "tags",
-		Short: "List model IDs the router serves (GET /v1/models)",
+		Use:     "models",
+		Aliases: []string{"tags"},
+		Short:   "List model IDs the router serves (GET /v1/models)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := &http.Client{Timeout: 30 * time.Second}
 			resp, err := client.Get(routerURL() + "/v1/models")
