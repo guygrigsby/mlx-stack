@@ -1,13 +1,96 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/guygrigsby/mlx-stack/internal/config"
 )
+
+// newGroup has no existing port to inherit. add must auto-allocate a free high
+// port instead of erroring, so plain `mlxctl add <model> --group exp` works.
+func TestBuildSpecAutoAllocatesPort(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Router.Port = 8080
+	cfg.Router.ExtraPorts = []int{8081}
+	cfg.Backends = []config.BackendSpec{
+		{Name: "existing", Engine: "lm", Mode: "swap", Group: "chat", Host: "127.0.0.1", Port: 8200},
+	}
+
+	spec, err := buildSpec("", "org/diffusiongemma", "", "vlm", "", "exp", "127.0.0.1", 0, false, "", cfg)
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	if spec.Port == 0 {
+		t.Fatal("want an auto-allocated port, got 0")
+	}
+	if spec.Port < 1024 {
+		t.Errorf("want a high port, got %d", spec.Port)
+	}
+	for _, p := range []int{8080, 8081, 8200} {
+		if spec.Port == p {
+			t.Errorf("auto port %d collides with a configured port", p)
+		}
+	}
+	if err := validateNewBackend(spec); err != nil {
+		t.Errorf("auto-allocated spec should validate, got: %v", err)
+	}
+}
+
+// A swap member joining an existing group inherits that group's port; no
+// allocation happens.
+func TestBuildSpecSwapInheritsGroupPort(t *testing.T) {
+	cfg := &config.Config{Backends: []config.BackendSpec{
+		{Name: "a", Engine: "lm", Mode: "swap", Group: "chat", Host: "127.0.0.1", Port: 31000},
+	}}
+	spec, err := buildSpec("", "org/m", "", "lm", "", "chat", "127.0.0.1", 0, false, "", cfg)
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	if spec.Port != 31000 {
+		t.Errorf("swap member should inherit group port 31000, got %d", spec.Port)
+	}
+}
+
+// An explicit --port always wins over allocation/inheritance.
+func TestBuildSpecExplicitPortWins(t *testing.T) {
+	cfg := &config.Config{}
+	spec, err := buildSpec("", "org/m", "", "vlm", "", "exp", "127.0.0.1", 8200, false, "", cfg)
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	if spec.Port != 8200 {
+		t.Errorf("explicit --port should win, got %d", spec.Port)
+	}
+}
+
+func TestAllocatePortSkipsUsedAndIsBindable(t *testing.T) {
+	// Reserve a port, mark it used, and confirm the allocator returns something
+	// else that is itself bindable right now.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	reserved := ln.Addr().(*net.TCPAddr).Port
+
+	got, err := allocatePort("127.0.0.1", map[int]bool{reserved: true})
+	if err != nil {
+		t.Fatalf("allocatePort: %v", err)
+	}
+	if got == reserved {
+		t.Fatalf("allocator returned the used port %d", got)
+	}
+	probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(got)))
+	if err != nil {
+		t.Fatalf("allocated port %d is not bindable: %v", got, err)
+	}
+	probe.Close()
+}
 
 func TestSamplerFromFlags(t *testing.T) {
 	if s := samplerFromFlags(0, 0, 0, 0, 0, 0); s != nil {

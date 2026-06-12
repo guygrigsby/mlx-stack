@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,7 +71,20 @@ func newAddCmd() *cobra.Command {
 				return err
 			}
 
-			spec := buildSpec(modelDir, modelRef, name, engine, mode, group, host, port, def, draft, cfg)
+			spec, err := buildSpec(modelDir, modelRef, name, engine, mode, group, host, port, def, draft, cfg)
+			if err != nil {
+				return err
+			}
+			// autoPort is true only when buildSpec allocated a brand-new port.
+			// An inherited swap-group port matches an existing backend, so it is
+			// not "auto" — the group chose it.
+			autoPort := port == 0 && spec.Port != 0
+			for _, b := range cfg.Backends {
+				if b.Port == spec.Port {
+					autoPort = false
+					break
+				}
+			}
 			spec.Sampler = samplerFromFlags(temperature, topP, topK, minP, repPenalty, maxTokens)
 
 			exists := false
@@ -96,8 +110,12 @@ func newAddCmd() *cobra.Command {
 			} else if err := appendBackend(configPath, spec); err != nil {
 				return fmt.Errorf("append: %w", err)
 			}
-			fmt.Printf("%s [[backend]] name=%q engine=%s mode=%s port=%d → %s\n",
-				verb, spec.Name, spec.Engine, spec.Mode, spec.Port, configPath)
+			portNote := ""
+			if autoPort {
+				portNote = " (auto)"
+			}
+			fmt.Printf("%s [[backend]] name=%q engine=%s mode=%s port=%d%s → %s\n",
+				verb, spec.Name, spec.Engine, spec.Mode, spec.Port, portNote, configPath)
 
 			// Hot-reload the running daemon so the backend is usable now. Best
 			// effort: a down daemon must never fail the config write. Reload is
@@ -125,7 +143,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", "", "swap|persistent (default: swap for lm/vlm, persistent for embed/audio)")
 	cmd.Flags().StringVar(&group, "group", "", "swap group (default: chat for swap, name for persistent)")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host")
-	cmd.Flags().IntVar(&port, "port", 0, "port (required for new persistent backends; new swap groups need --port too)")
+	cmd.Flags().IntVar(&port, "port", 0, "upstream port (default: auto-allocated free high port; swap members inherit their group's)")
 	cmd.Flags().BoolVar(&def, "default", false, "mark as default member of its swap group")
 	cmd.Flags().StringVar(&draft, "draft", "", "draft model path (engine=lm only)")
 	cmd.Flags().BoolVar(&noDownload, "no-download", false, "for HF args: do not pre-download; let mlx_lm fetch lazily")
@@ -218,7 +236,11 @@ func newScanCmd() *cobra.Command {
 						fmt.Fprintf(os.Stderr, "skip %s: could not detect engine (config.json missing model_type?); add manually with --engine\n", c.name)
 						continue
 					}
-					spec := buildSpec(c.path, c.path, c.name, c.engine, "", "", "127.0.0.1", 0, false, "", cfg)
+					spec, err := buildSpec(c.path, c.path, c.name, c.engine, "", "", "127.0.0.1", 0, false, "", cfg)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
+						continue
+					}
 					if err := validateNewBackend(spec); err != nil {
 						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
 						continue
@@ -398,7 +420,7 @@ func defaultStr(s, fallback string) string {
 	return s
 }
 
-func buildSpec(modelDir, modelRef, name, engine, mode, group, host string, port int, def bool, draft string, cfg *config.Config) config.BackendSpec {
+func buildSpec(modelDir, modelRef, name, engine, mode, group, host string, port int, def bool, draft string, cfg *config.Config) (config.BackendSpec, error) {
 	if name == "" {
 		if modelDir != "" {
 			name = sanitizeName(filepath.Base(modelDir))
@@ -440,20 +462,66 @@ func buildSpec(modelDir, modelRef, name, engine, mode, group, host string, port 
 			}
 		}
 	}
+	if port == 0 {
+		// Internal upstream port — the router fronts every backend, so the
+		// number is plumbing the user shouldn't have to pick. Grab a free high
+		// one that doesn't collide with anything already in the config.
+		p, err := allocatePort(host, usedPorts(cfg))
+		if err != nil {
+			return config.BackendSpec{}, err
+		}
+		port = p
+	}
 	return config.BackendSpec{
 		Name: name, Engine: engine, Mode: mode, Group: group,
 		Host: host, Port: port, Model: modelRef, DraftModel: draft, Default: def,
+	}, nil
+}
+
+// usedPorts collects every port the config already commits to: the router's
+// own port, its extra ports, and each backend's upstream port. allocatePort
+// avoids these so a fresh backend never shadows an existing listener.
+func usedPorts(cfg *config.Config) map[int]bool {
+	used := map[int]bool{}
+	if cfg.Router.Port > 0 {
+		used[cfg.Router.Port] = true
 	}
+	for _, p := range cfg.Router.ExtraPorts {
+		used[p] = true
+	}
+	for _, b := range cfg.Backends {
+		if b.Port > 0 {
+			used[b.Port] = true
+		}
+	}
+	return used
+}
+
+// allocatePort returns a free high port on host. The kernel hands out an
+// ephemeral port via :0 (guaranteed bindable right now); we re-roll if it
+// happens to match a port the config already claims but isn't listening on.
+func allocatePort(host string, used map[int]bool) (int, error) {
+	for range 50 {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		if err != nil {
+			return 0, fmt.Errorf("auto-allocate port: %w", err)
+		}
+		p := ln.Addr().(*net.TCPAddr).Port
+		ln.Close()
+		if !used[p] {
+			return p, nil
+		}
+	}
+	return 0, fmt.Errorf("auto-allocate port: no free port outside the %d configured ports after 50 tries", len(used))
 }
 
 // validateNewBackend checks mode/port constraints. The caller handles
-// duplicate-name policy (reject vs --overwrite) before this runs.
+// duplicate-name policy (reject vs --overwrite) before this runs. buildSpec
+// always resolves a port (explicit, inherited, or auto-allocated), so a zero
+// here means an internal bug rather than missing user input.
 func validateNewBackend(spec config.BackendSpec) error {
-	if spec.Mode == "swap" && spec.Port == 0 {
-		return fmt.Errorf("swap mode requires --port (group %q has no existing port to inherit)", spec.Group)
-	}
-	if spec.Mode == "persistent" && spec.Port == 0 && spec.Engine != "audio" {
-		return fmt.Errorf("persistent mode requires --port")
+	if spec.Mode != "external" && spec.Port == 0 {
+		return fmt.Errorf("internal: backend %q has no port after spec build", spec.Name)
 	}
 	return nil
 }
