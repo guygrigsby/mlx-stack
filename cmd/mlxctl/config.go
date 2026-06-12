@@ -25,7 +25,9 @@ func newConfigShowCmd() *cobra.Command {
 		Short: "Print the current TOML config",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := os.ExpandEnv("$HOME/.config/mlx/config.toml")
+			// Positional path wins for back-compat; otherwise the same
+			// resolution every command uses (--config, env, default).
+			path := configPath()
 			if len(args) > 0 {
 				path = args[0]
 			}

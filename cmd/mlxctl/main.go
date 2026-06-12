@@ -43,7 +43,9 @@ Common workflow:
   mlxctl chat "hello"            chat with the loaded chat model
 
 mlxctl talks to mlxd over a unix socket (override with MLXD_SOCK) and to the
-router over HTTP (override with MLXD_ROUTER).`,
+router over HTTP (override with MLXD_ROUTER). The config file defaults to
+~/.config/mlx/config.toml; override with --config or MLXD_CONFIG (MLX_CONFIG
+is honored for back-compat).`,
 		SilenceUsage: true,
 		// main() prints the error Execute returns; without this cobra prints
 		// it too and every failure shows up twice.
@@ -54,6 +56,7 @@ router over HTTP (override with MLXD_ROUTER).`,
 	// it. Default is the human-readable view; --output json emits the raw
 	// daemon payload for scripting.
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", `output format: "text" or "json"`)
+	root.PersistentFlags().StringVar(&configFlag, "config", "", "config.toml path (default: $MLXD_CONFIG, $MLX_CONFIG, or ~/.config/mlx/config.toml)")
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		switch outputFormat {
 		case "text", "json":
@@ -129,6 +132,25 @@ func notRunning() error {
 var outputFormat string
 
 func outputJSON() bool { return outputFormat == "json" }
+
+// configFlag is the value of the global --config flag.
+var configFlag string
+
+// configPath resolves the config file every command uses, in precedence
+// order: --config flag, MLXD_CONFIG, MLX_CONFIG (legacy), then the default
+// ~/.config/mlx/config.toml.
+func configPath() string {
+	if configFlag != "" {
+		return configFlag
+	}
+	if p := os.Getenv("MLXD_CONFIG"); p != "" {
+		return p
+	}
+	if p := os.Getenv("MLX_CONFIG"); p != "" {
+		return p
+	}
+	return defaultConfigPathLocal()
+}
 
 // printStatus prints the daemon's current status in the active output
 // format: the human table by default, the raw /v1/status JSON under

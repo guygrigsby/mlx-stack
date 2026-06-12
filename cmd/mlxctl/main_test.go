@@ -26,6 +26,44 @@ func TestRootCmd_ErrorsPrintOnce(t *testing.T) {
 	}
 }
 
+// One config-resolution path for every command:
+// --config flag > MLXD_CONFIG > MLX_CONFIG (legacy) > default.
+func TestConfigPathPrecedence(t *testing.T) {
+	t.Setenv("MLXD_CONFIG", "")
+	t.Setenv("MLX_CONFIG", "")
+
+	orig := configFlag
+	defer func() { configFlag = orig }()
+
+	configFlag = ""
+	if got := configPath(); !strings.HasSuffix(got, ".config/mlx/config.toml") {
+		t.Errorf("default: got %q", got)
+	}
+
+	t.Setenv("MLX_CONFIG", "/legacy.toml")
+	if got := configPath(); got != "/legacy.toml" {
+		t.Errorf("MLX_CONFIG fallback: got %q", got)
+	}
+
+	t.Setenv("MLXD_CONFIG", "/primary.toml")
+	if got := configPath(); got != "/primary.toml" {
+		t.Errorf("MLXD_CONFIG beats MLX_CONFIG: got %q", got)
+	}
+
+	configFlag = "/flag.toml"
+	if got := configPath(); got != "/flag.toml" {
+		t.Errorf("--config beats env: got %q", got)
+	}
+}
+
+// --config must be a root persistent flag so every subcommand accepts it.
+func TestConfigFlagIsPersistent(t *testing.T) {
+	root := newRootCmd()
+	if root.PersistentFlags().Lookup("config") == nil {
+		t.Fatal("--config should be a root persistent flag")
+	}
+}
+
 // The global --output validator must still run and reject bad values.
 func TestRootCmd_RejectsBadOutputFormat(t *testing.T) {
 	root := newRootCmd()

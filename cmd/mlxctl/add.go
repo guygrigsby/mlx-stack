@@ -45,7 +45,6 @@ func newAddCmd() *cobra.Command {
 		noDownload bool
 		noReload   bool
 		overwrite  bool
-		configPath string
 
 		temperature float64
 		topP        float64
@@ -60,8 +59,9 @@ func newAddCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			arg := args[0]
+			cfgPath := configPath()
 
-			cfg, err := config.Load(configPath)
+			cfg, err := config.Load(cfgPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
@@ -103,11 +103,11 @@ func newAddCmd() *cobra.Command {
 
 			verb := "added"
 			if exists {
-				if err := replaceBackend(configPath, spec.Name, spec); err != nil {
+				if err := replaceBackend(cfgPath, spec.Name, spec); err != nil {
 					return fmt.Errorf("replace: %w", err)
 				}
 				verb = "updated"
-			} else if err := appendBackend(configPath, spec); err != nil {
+			} else if err := appendBackend(cfgPath, spec); err != nil {
 				return fmt.Errorf("append: %w", err)
 			}
 			portNote := ""
@@ -115,7 +115,7 @@ func newAddCmd() *cobra.Command {
 				portNote = " (auto)"
 			}
 			fmt.Printf("%s [[backend]] name=%q engine=%s mode=%s port=%d%s → %s\n",
-				verb, spec.Name, spec.Engine, spec.Mode, spec.Port, portNote, configPath)
+				verb, spec.Name, spec.Engine, spec.Mode, spec.Port, portNote, cfgPath)
 
 			// Hot-reload the running daemon so the backend is usable now. Best
 			// effort: a down daemon must never fail the config write. Reload is
@@ -149,7 +149,6 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noDownload, "no-download", false, "for HF args: do not pre-download; let mlx_lm fetch lazily")
 	cmd.Flags().BoolVar(&noReload, "no-reload", false, "don't hot-reload the running mlxd after writing config")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace an existing backend of the same name in place")
-	cmd.Flags().StringVar(&configPath, "config", defaultConfigPathLocal(), "config.toml to modify")
 
 	// Sampler defaults written to [backend.sampler]. Omitted fields (left at 0)
 	// fall through to mlx_lm's own CLI defaults.
@@ -164,16 +163,14 @@ func newAddCmd() *cobra.Command {
 
 // newScanCmd walks a directory of models. With --add, appends missing ones to the config.
 func newScanCmd() *cobra.Command {
-	var (
-		add        bool
-		configPath string
-	)
+	var add bool
 	cmd := &cobra.Command{
 		Use:   "scan [<dir>]",
 		Short: "List models under a dir; --add appends missing ones",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(configPath)
+			cfgPath := configPath()
+			cfg, err := config.Load(cfgPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
@@ -245,7 +242,7 @@ func newScanCmd() *cobra.Command {
 						fmt.Fprintf(os.Stderr, "skip %s: %v\n", c.name, err)
 						continue
 					}
-					if err := appendBackend(configPath, spec); err != nil {
+					if err := appendBackend(cfgPath, spec); err != nil {
 						fmt.Fprintf(os.Stderr, "skip %s: append: %v\n", c.name, err)
 						continue
 					}
@@ -256,13 +253,12 @@ func newScanCmd() *cobra.Command {
 			}
 			tw.Flush()
 			if add {
-				fmt.Printf("\nadded %d backend(s) to %s\n", added, configPath)
+				fmt.Printf("\nadded %d backend(s) to %s\n", added, cfgPath)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&add, "add", false, "append missing entries to the config")
-	cmd.Flags().StringVar(&configPath, "config", defaultConfigPathLocal(), "config.toml to read/modify")
 	return cmd
 }
 

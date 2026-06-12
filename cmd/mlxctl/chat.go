@@ -37,11 +37,7 @@ func postChat(client *http.Client, url string, body []byte) (*http.Response, err
 }
 
 func loadCfg() *config.Config {
-	path := os.Getenv("MLX_CONFIG")
-	if path == "" {
-		path = defaultConfigPathLocal()
-	}
-	c, err := config.Load(path)
+	c, err := config.Load(configPath())
 	if err != nil {
 		return nil
 	}
