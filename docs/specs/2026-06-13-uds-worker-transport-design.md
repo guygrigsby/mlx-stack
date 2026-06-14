@@ -107,6 +107,14 @@ that `uds=` is accepted. No real-venv shape-assertion gate test needed.
 - `mlxctl add` drops the `port=N` note for internal backends.
 - Router's own port/URL still shown — public surface.
 
+### Fake worker (`testdata/fakemlx`)
+- Gains `--uds <path>`: bind a `unix` listener instead of `host:port` (the Go
+  equivalent of the uvicorn `uds=` path). `--port` and `--uds` are mutually
+  exclusive. This is what lets the `e2e` suite drive a real worker over a real
+  unix socket through the real router stack without an MLX model. The fake
+  worker is the regression harness for the transport, so it must mirror both
+  transports the daemon can select.
+
 ## Data flow (shape unchanged)
 
 client → router TCP listener → `Resolve(model)` → `EnsureLoaded` → `ProxyJSON`
@@ -125,18 +133,59 @@ over the backend's transport (unix socket or loopback) → worker.
 
 ## Testing (TDD, failing-first)
 
-Go:
-- `transportFor(engine)` mapping table test (lm → loopback, uvicorn engines → uds).
-- `ProxyJSON` against a real `net.Listen("unix")` upstream served by
-  `http.Server.Serve`.
-- Ephemeral loopback port is never written to config (assert config round-trip).
-- `render` / `handlers` omit internal upstream ports/URLs; still show router port.
+This is a big, cross-cutting change to the router↔worker path. The regression
+guard is layered: unit tests pin each seam, **integration tests exercise the
+real transport end-to-end through a real `mlxd`**, and a gated suite proves it
+against real models. The integration layer is the one that catches regressions,
+so it is the priority and runs in the default gate.
 
-Python:
-- Spy on `uvicorn.run` (monkeypatched): when `MLX_UDS` set, assert `uds=` passed
-  and `host`/`port` dropped; when unset, host/port preserved.
-- Import test: installed `uvicorn` accepts a `uds` parameter (guards the one
-  remaining external assumption).
+### Unit (fast, `go test ./...` / `pytest`)
+- Go: `transportFor(engine)` mapping table test (lm → loopback, uvicorn engines
+  → uds).
+- Go: `ProxyJSON` against a real `net.Listen("unix")` upstream served by
+  `http.Server.Serve` — proves the router's per-backend transport actually
+  dials a unix socket and proxies/rewrites correctly.
+- Go: ephemeral loopback port is never written back to config (config
+  round-trip assertion).
+- Go: `render` / `handlers` omit internal upstream ports/URLs; still show the
+  router port.
+- Python: spy on `uvicorn.run` (monkeypatched) — when `MLX_UDS` set, assert
+  `uds=` passed and `host`/`port` dropped; when unset, host/port preserved.
+
+### Integration — real mlxd + fake worker (default gate, `e2e/`)
+Built on the existing `e2e` harness (real `mlxd` + `fakemlx`, skipped only under
+`-short`, already part of `go test ./...`). Each test boots a real daemon from a
+real config and drives requests through the real router. New cases:
+- **UDS path, per uvicorn engine** (`vlm`, `audio`, `embed`): config declares the
+  backend with no port; daemon derives `~/.local/state/mlxd/<name>.sock`
+  (redirected to the test temp dir), spawns `fakemlx --uds <path>`; a
+  `/v1/chat/completions` (and `/v1/embeddings`, `/v1/audio/speech`) request
+  round-trips 200. Assert the socket file exists and is the dial target.
+- **Loopback-ephemeral path** (`lm`): config declares the backend with **no
+  `port`**; request round-trips; assert no stable port was persisted or
+  surfaced.
+- **Hot-swap over UDS**: extend the existing `TestE2E_HotSwap` shape to a swap
+  group on the UDS transport, proving load/unload/reuse works over a unix
+  socket.
+- **Regression invariant** — `/v1/status` JSON and `mlxctl list` output contain
+  **no upstream port/URL for internal backends** (only the router port). This is
+  the direct guard on the "obscure the ports" goal: any future change that
+  reintroduces port surfacing fails here.
+
+### Python integration — real uvicorn over UDS (default gate, `python/tests`)
+- Launch the embed shim (`--engine embed --uds <tmp.sock>`) against a trivial
+  app, connect a real HTTP client over the unix socket, assert a 200. Proves the
+  one remaining runtime patch (`uvicorn.run(uds=...)`) binds a real socket
+  against the **installed** uvicorn — not a mock. Doubles as the guard on the
+  "installed uvicorn accepts `uds`" assumption.
+
+### Gated — real models, real transport (manual / `gputex`, not default gate)
+- `//go:build integration` (or `MLX_E2E_REAL=1`) suite: one small real model per
+  engine, started by a real `mlxd`, round-tripped over the actual UDS / loopback
+  transport, asserting 200 and no surfaced port. Metal-bound and mlxd owns the
+  GPU, so it is excluded from `make test` and documented to run via
+  `gputex run "uds-e2e" -- go test -tags integration ./e2e/...`. This is the
+  "real path" confirmation required before claiming the change works.
 
 ## Out of scope
 
