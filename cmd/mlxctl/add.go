@@ -114,8 +114,8 @@ func newAddCmd() *cobra.Command {
 			if autoPort {
 				portNote = " (auto)"
 			}
-			fmt.Printf("%s [[backend]] name=%q engine=%s mode=%s port=%d%s → %s\n",
-				verb, spec.Name, spec.Engine, spec.Mode, spec.Port, portNote, cfgPath)
+			fmt.Printf("%s [[backend]] name=%q engine=%s type=%s port=%d%s → %s\n",
+				verb, spec.Name, spec.Engine, slotType(spec.Mode), spec.Port, portNote, cfgPath)
 
 			// Hot-reload the running daemon so the backend is usable now. Best
 			// effort: a down daemon must never fail the config write. Reload is
@@ -557,9 +557,20 @@ func renderBackend(b config.BackendSpec) string {
 	sb.WriteString("[[backend]]\n")
 	sb.WriteString(fmt.Sprintf("name   = %q\n", b.Name))
 	sb.WriteString(fmt.Sprintf("engine = %q\n", b.Engine))
-	sb.WriteString(fmt.Sprintf("mode   = %q\n", b.Mode))
-	if b.Group != "" && b.Group != b.Name {
-		sb.WriteString(fmt.Sprintf("group  = %q\n", b.Group))
+	// Canonical slot vocabulary (see ADR 0001). slot is emitted only when this
+	// model shares a slot with others; warm marks an always-on lm/vlm (embed/
+	// audio are warm implicitly).
+	switch b.Mode {
+	case "persistent":
+		if b.Engine == "lm" || b.Engine == "vlm" {
+			sb.WriteString("warm   = true\n")
+		}
+	case "external":
+		sb.WriteString("remote = true\n")
+	default:
+		if b.Group != "" && b.Group != b.Name {
+			sb.WriteString(fmt.Sprintf("slot   = %q\n", b.Group))
+		}
 	}
 	if b.Default {
 		sb.WriteString("default = true\n")
