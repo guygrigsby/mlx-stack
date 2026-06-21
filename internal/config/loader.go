@@ -34,13 +34,9 @@ func Load(path string) (*Config, error) {
 		c.Backends[i].Model = expandHome(c.Backends[i].Model)
 		c.Backends[i].DraftModel = expandHome(c.Backends[i].DraftModel)
 
-		// Mode-specific defaults
-		if c.Backends[i].Mode == "swap" && c.Backends[i].Group == "" {
-			c.Backends[i].Group = c.Backends[i].Name
-		}
-		if c.Backends[i].Mode == "external" && c.Backends[i].UpstreamModel == "" {
-			c.Backends[i].UpstreamModel = c.Backends[i].Name
-		}
+		// Reconcile slot/warm/remote <-> legacy mode/group and fill derived
+		// defaults (slot name, external upstream model).
+		c.Backends[i].normalize()
 	}
 
 	if err := c.Validate(); err != nil {

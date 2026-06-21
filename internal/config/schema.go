@@ -37,11 +37,22 @@ type Defaults struct {
 
 // BackendSpec is one entry in the [[backend]] array-of-tables.
 type BackendSpec struct {
-	Name            string    `toml:"name"`
-	Engine          string    `toml:"engine"`
-	Mode            string    `toml:"mode"`              // "swap" | "persistent" | "external"
-	Group           string    `toml:"group"`             // for swap mode; defaults to Name
-	Default         bool      `toml:"default"`           // for swap members: auto-load on group start
+	Name   string `toml:"name"`
+	Engine string `toml:"engine"`
+
+	// Slot/Warm/Remote are the canonical vocabulary (see docs/adr/0001).
+	// Slot is the addressable name a request targets; members sharing a slot
+	// share memory and swap. Warm starts at boot and respawns on crash. Remote
+	// proxies an external URL. Mode/Group are the legacy synonyms, still parsed
+	// for back-compat; normalize() keeps both sides consistent and the internal
+	// supervisor/router code continues to read Mode/Group.
+	Slot   string `toml:"slot"`
+	Warm   bool   `toml:"warm"`
+	Remote bool   `toml:"remote"`
+
+	Mode            string    `toml:"mode"`    // legacy: "swap" | "persistent" | "external" (derived from Slot/Warm/Remote)
+	Group           string    `toml:"group"`   // legacy synonym for Slot
+	Default         bool      `toml:"default"` // for slot members: load when the slot is addressed by name
 	Host            string    `toml:"host"`
 	Port            int       `toml:"port"`
 	Model           string    `toml:"model"`
@@ -81,6 +92,63 @@ type Watchdog struct {
 
 type Memlog struct {
 	IntervalSec int `toml:"interval_sec"`
+}
+
+// normalize reconciles the canonical slot/warm/remote fields with the legacy
+// mode/group fields so that, whichever the user authored, both sides are
+// consistent. The internal supervisor and router read Mode/Group; the CLI and
+// migrator read Slot/Warm/Remote. Derivation:
+//
+//   - remote (or legacy mode=external)      -> Mode=external, slot of one
+//   - warm / embed / audio (singletons)     -> Mode=persistent, slot=name
+//   - otherwise (lm/vlm)                     -> Mode=swap (lazy), slot defaults to name
+//
+// embed and audio are inherently single-process singletons, so they are always
+// warm regardless of what the user wrote.
+func (b *BackendSpec) normalize() {
+	// Absorb legacy mode into the new flags.
+	switch b.Mode {
+	case "external":
+		b.Remote = true
+	case "persistent":
+		b.Warm = true
+	}
+	// group is the legacy synonym for slot.
+	if b.Slot == "" {
+		b.Slot = b.Group
+	}
+
+	if b.Remote {
+		b.Mode = "external"
+		if b.Slot == "" {
+			b.Slot = b.Name
+		}
+		if b.UpstreamModel == "" {
+			b.UpstreamModel = b.Name
+		}
+		b.Group = b.Slot
+		return
+	}
+
+	if b.Engine == "embed" || b.Engine == "audio" {
+		b.Warm = true
+	}
+
+	if b.Warm {
+		// A warm slot is a slot of one, addressed by its own name.
+		b.Mode = "persistent"
+		b.Slot = b.Name
+		b.Group = b.Name
+		return
+	}
+
+	// Lazy slot (lm/vlm): loads on demand, swaps with slot-mates, stays
+	// resident. A bare model with no slot becomes its own slot of one.
+	b.Mode = "swap"
+	if b.Slot == "" {
+		b.Slot = b.Name
+	}
+	b.Group = b.Slot
 }
 
 func (b BackendSpec) EffectiveCache(d Defaults) Cache {
