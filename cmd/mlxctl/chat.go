@@ -159,12 +159,47 @@ func newChatCmd() *cobra.Command {
 			if model == "" {
 				return fmt.Errorf("no chat-capable backend found (need a swap-mode lm backend in config or running)")
 			}
-			payload := buildChatPayload(model, strings.Join(args, " "), !noStream, samplerFor(model))
+			prompt, err := expandFileArgs(args)
+			if err != nil {
+				return err
+			}
+			payload := buildChatPayload(model, prompt, !noStream, samplerFor(model))
 			return sendChatCompletion(model, payload, noStream)
 		},
 	}
 	cmd.Flags().BoolVar(&noStream, "no-stream", false, "buffer the full reply instead of streaming tokens")
 	return cmd
+}
+
+// expandFileArgs joins args into the prompt, replacing any arg that starts with
+// '@' with the referenced file's contents (curl-style, with leading ~ expanded).
+// "@-" reads stdin. A bare "@" is left literal.
+func expandFileArgs(args []string) (string, error) {
+	out := make([]string, len(args))
+	for i, a := range args {
+		if len(a) < 2 || a[0] != '@' {
+			out[i] = a
+			continue
+		}
+		path := a[1:]
+		var data []byte
+		var err error
+		if path == "-" {
+			data, err = io.ReadAll(os.Stdin)
+		} else {
+			if strings.HasPrefix(path, "~/") {
+				if home, herr := os.UserHomeDir(); herr == nil {
+					path = home + path[1:]
+				}
+			}
+			data, err = os.ReadFile(path)
+		}
+		if err != nil {
+			return "", fmt.Errorf("read %q: %w", a, err)
+		}
+		out[i] = string(data)
+	}
+	return strings.Join(out, " "), nil
 }
 
 // buildChatPayload assembles an OpenAI chat-completions request body. content is
