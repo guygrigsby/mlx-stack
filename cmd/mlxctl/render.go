@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/guygrigsby/mlx-stack/internal/config"
 )
 
 const (
@@ -113,7 +115,7 @@ func renderStatus(w io.Writer, body []byte) {
 	if color {
 		runHdr = ansiDefault + runHdr + ansiReset
 	}
-	fmt.Fprintf(tw, "NAME\tGROUP\tMODE\tENGINE\tMODEL\tURL\t%s\tPID\tCURRENT\tTIER\tMEM(active/cache/peak)\tLAST TIMING\n", runHdr)
+	fmt.Fprintf(tw, "NAME\tSLOT\tTYPE\tKIND\tMODEL\tURL\t%s\tPID\tCURRENT\tTIER\tMEM(active/cache/peak)\tLAST TIMING\n", runHdr)
 	names := make([]string, 0, len(s.Backends))
 	idx := map[string]backendStatusJSON{}
 	for _, b := range s.Backends {
@@ -165,24 +167,145 @@ func renderStatus(w io.Writer, body []byte) {
 		if current == "" {
 			current = "-"
 		}
-		// Group only means anything for swap backends (members sharing one
-		// slot). For persistent/external it's a no-op, so don't imply otherwise.
-		group := "-"
-		if b.Mode == "swap" {
-			group = b.Group
+		// Slot is the addressable name; for a multi-model slot it groups the
+		// members, for warm/remote it equals the name.
+		slot := b.Group
+		if slot == "" {
+			slot = b.Name
 		}
+		kind := kindWord(b.Engine)
 		tier := b.Tier
 		if tier == "" {
 			tier = "-"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			b.Name, group, b.Mode, b.Engine, shortModel(b.Model), b.URL, running, b.PID, current, tier, mem, tim)
+			b.Name, slot, slotType(b.Mode), kind, shortModel(b.Model), b.URL, running, b.PID, current, tier, mem, tim)
 	}
 	tw.Flush()
 
 	if s.CacheBudgetBytes > 0 {
 		fmt.Fprintf(w, "\nCACHE  %s / %s\n", humanBytes(s.CacheUsedBytes), humanBytes(s.CacheBudgetBytes))
 	}
+}
+
+// kindWord translates an internal engine id to the human word shown in list
+// output. "" (external/unknown) falls back to a dash.
+func kindWord(engine string) string {
+	switch engine {
+	case "lm":
+		return "chat"
+	case "vlm":
+		return "vision"
+	case "audio":
+		return "speech"
+	case "embed":
+		return "embeddings"
+	default:
+		return "-"
+	}
+}
+
+// slotType translates an internal mode to the user word for a slot's nature.
+func slotType(mode string) string {
+	switch mode {
+	case "swap":
+		return "slot"
+	case "persistent":
+		return "warm"
+	case "external":
+		return "remote"
+	default:
+		return mode
+	}
+}
+
+// slotState is the one-word live state of a single-model slot, in user
+// vocabulary: remote, warm, loaded, loading, wedged, or idle.
+func slotState(sp config.BackendSpec, live backendStatusJSON) string {
+	if sp.Remote {
+		return "remote"
+	}
+	switch live.State {
+	case "ready":
+		if sp.Warm {
+			return "warm"
+		}
+		return "loaded"
+	case "loading":
+		return "loading"
+	case "unhealthy":
+		return "wedged"
+	default:
+		if sp.Warm {
+			return "warm·stopped"
+		}
+		return "idle"
+	}
+}
+
+// stateColor wraps a state word in the matching color when enabled.
+func stateColor(word string, color bool) string {
+	if !color {
+		return word
+	}
+	switch word {
+	case "loaded", "warm":
+		return ansiGreen + word + ansiReset
+	case "loading":
+		return ansiYellow + word + ansiReset
+	case "wedged", "warm·stopped":
+		return ansiRed + word + ansiReset
+	default:
+		return word
+	}
+}
+
+// renderList prints the friendly slot view: every addressable slot, the models
+// it can load (indented when more than one), and which is hot. Membership comes
+// from the config; live state (which member is loaded, health) from the status
+// snapshot. This is the "what can I talk to" view; `status` stays the detailed
+// power table.
+func renderList(w io.Writer, specs []config.BackendSpec, s statusJSON) {
+	color := useColor(w)
+	st := map[string]backendStatusJSON{}
+	for _, b := range s.Backends {
+		st[b.Name] = b
+	}
+
+	order := []string{}
+	bySlot := map[string][]config.BackendSpec{}
+	for _, sp := range specs {
+		if _, ok := bySlot[sp.Slot]; !ok {
+			order = append(order, sp.Slot)
+		}
+		bySlot[sp.Slot] = append(bySlot[sp.Slot], sp)
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "SLOT / MODEL\tKIND\tSTATE")
+	for _, slot := range order {
+		members := bySlot[slot]
+		live := st[slot]
+		if len(members) == 1 {
+			m := members[0]
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", slot, kindWord(m.Engine), stateColor(slotState(m, live), color))
+			continue
+		}
+		// Multi-model slot: header line then one indented row per candidate.
+		loaded := 0
+		if live.CurrentName != "" {
+			loaded = 1
+		}
+		fmt.Fprintf(tw, "%s\tslot\t%d of %d loaded\n", slot, loaded, len(members))
+		for _, m := range members {
+			state, glyph := "idle", "○"
+			if m.Name == live.CurrentName {
+				state, glyph = slotState(m, live), "●"
+			}
+			fmt.Fprintf(tw, "  %s\t%s\t%s %s\n", m.Name, kindWord(m.Engine), glyph, stateColor(state, color))
+		}
+	}
+	tw.Flush()
 }
 
 // shortModel trims a local model directory to its last path segment (the model

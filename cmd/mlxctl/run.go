@@ -21,13 +21,11 @@ func newRunCmd() *cobra.Command {
 		maxTokens int
 	)
 	cmd := &cobra.Command{
-		Use:   "run <model> \"...\"",
-		Short: "Run inference against any lm/vlm backend by name (streams by default)",
-		Long: "Run a prompt against a specific backend or group by name, e.g. " +
-			"`mlxctl run coder \"write a fib fn\"` or `mlxctl run exp \"what's this?\" --image cat.png`. " +
-			"The router loads the model on demand. Use --image (repeatable) for vision models; " +
-			"local paths are inlined, http(s) URLs are passed through.",
-		Args: cobra.MinimumNArgs(2),
+		Use:        "run <slot> \"...\"",
+		Short:      "Deprecated: use `mlxctl chat <slot> \"...\"`",
+		Hidden:     true,
+		Deprecated: "use `mlxctl chat <slot> \"...\"` instead",
+		Args:       cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			model := args[0]
 			prompt := strings.Join(args[1:], " ")

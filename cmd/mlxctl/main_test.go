@@ -71,7 +71,7 @@ func TestCommandAliases(t *testing.T) {
 	for alias, want := range map[string]string{
 		"tags":   "models",
 		"swap":   "start",
-		"list":   "status",
+		"list":   "list",
 		"models": "models",
 		"start":  "start",
 		"status": "status",

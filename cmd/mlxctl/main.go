@@ -23,25 +23,21 @@ func main() {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "mlxctl",
-		Short: "Control mlxd: status, swap models, send requests, manage backends",
+		Short: "Control mlxd: list slots, send messages, manage models",
 		Long: `mlxctl controls mlxd, the local MLX model daemon.
 
-mlxd runs models as backends in one of two modes:
-
-  swap        members of a group share one port; only one is resident at a
-              time. Loading another member evicts the current one. Chat models
-              live in the "chat" group.
-  persistent  always-on, each on its own port (embeddings, audio, a dedicated
-              coder, and so on).
+Every model has a name. Talk to it: mlxctl chat <name> "...". Models are either
+always-on (warm) or share a slot (one model per slot is resident at a time; mlxd
+swaps automatically when you address a different one). mlxctl list shows them.
 
 Common workflow:
 
-  mlxctl status                  backends and which swap member is loaded
+  mlxctl list                    slots, the models each can load, and which is hot
+  mlxctl chat "hello"            send to the loaded chat model
+  mlxctl chat scout "what's this" --image cat.png   send to a specific model
   mlxctl scan                    model checkpoints on disk (--add registers them)
-  mlxctl add <path-or-hf-repo>   register a backend (downloads HF repos)
-  mlxctl start <name>            load a backend or swap member (alias: swap)
-  mlxctl chat "hello"            chat with the loaded chat model
-  mlxctl run <model> "..."       run a prompt against any lm/vlm backend
+  mlxctl add <path-or-hf-repo>   register a model (downloads HF repos)
+  mlxctl status                  detailed table (engine, model, pid, mem, timing)
 
 mlxctl talks to mlxd over a unix socket (override with MLXD_SOCK) and to the
 router over HTTP (override with MLXD_ROUTER). The config file defaults to
@@ -88,6 +84,7 @@ is honored for back-compat).`,
 		newStartCmd(),
 		newStopCmd(),
 		newRestartCmd(),
+		newListCmd(),
 		newStatusCmd(),
 		newHealthCmd(),
 		newOffloadCmd(),

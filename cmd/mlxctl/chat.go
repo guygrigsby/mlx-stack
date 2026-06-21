@@ -149,26 +149,79 @@ func applySampler(payload map[string]any, s *config.Sampler) {
 }
 
 func newChatCmd() *cobra.Command {
-	var noStream bool
+	var (
+		noStream  bool
+		images    []string
+		maxTokens int
+	)
 	cmd := &cobra.Command{
-		Use:   "chat \"...\"",
-		Short: "Chat with the loaded chat model via the router (streams by default)",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "chat [slot] \"...\"",
+		Short: "Send a message to a model via the router (streams by default)",
+		Long: "Send a message to a model. With no slot, auto-picks the loaded chat model:\n" +
+			"  mlxctl chat \"what's a monad\"\n" +
+			"Name a slot to target a specific model (loads/swaps on demand):\n" +
+			"  mlxctl chat scout \"what's in this\" --image cat.png\n" +
+			"An @file arg is replaced with that file's contents (@- reads stdin).",
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			model := resolveChatModel()
+			model, promptArgs := pickSlot(args, knownSlotName, resolveChatModel)
 			if model == "" {
-				return fmt.Errorf("no chat-capable backend found (need a swap-mode lm backend in config or running)")
+				return fmt.Errorf("no chat-capable backend found (need an lm slot in config or loaded)")
 			}
-			prompt, err := expandFileArgs(args)
+			// Guard against addressing an engine chat can't drive (audio/embed).
+			if cfg := loadCfg(); cfg != nil {
+				if engine, ok := runModelEngine(cfg, model); ok {
+					if err := checkRunEngine(engine); err != nil {
+						return err
+					}
+				}
+			}
+			prompt, err := expandFileArgs(promptArgs)
 			if err != nil {
 				return err
 			}
-			payload := buildChatPayload(model, prompt, !noStream, samplerFor(model))
+			content, err := buildContent(prompt, images)
+			if err != nil {
+				return err
+			}
+			payload := buildChatPayload(model, content, !noStream, samplerFor(model))
+			if maxTokens > 0 {
+				payload["max_tokens"] = maxTokens
+			}
 			return sendChatCompletion(model, payload, noStream)
 		},
 	}
 	cmd.Flags().BoolVar(&noStream, "no-stream", false, "buffer the full reply instead of streaming tokens")
+	cmd.Flags().StringArrayVar(&images, "image", nil, "image path or http(s) URL for vision models (repeatable)")
+	cmd.Flags().IntVar(&maxTokens, "max-tokens", 0, "max output tokens (overrides the slot sampler/default)")
 	return cmd
+}
+
+// pickSlot decides whether the first arg targets a specific slot. It does only
+// when there is a prompt after it AND the name matches a known slot/model in
+// config; otherwise every arg is the prompt to the auto-picked chat model. This
+// keeps `chat some unquoted words` a prompt while enabling `chat scout "..."`.
+func pickSlot(args []string, isKnown func(string) bool, autoPick func() string) (model string, promptArgs []string) {
+	if len(args) >= 2 && isKnown(args[0]) {
+		return args[0], args[1:]
+	}
+	return autoPick(), args
+}
+
+// knownSlotName reports whether name matches a configured slot, group, or
+// backend name. Used only to disambiguate `chat <slot> ...` from a prompt, so a
+// false negative (config unreadable) just falls back to treating it as a prompt.
+func knownSlotName(name string) bool {
+	c := loadCfg()
+	if c == nil {
+		return false
+	}
+	for _, b := range c.Backends {
+		if b.Name == name || b.Slot == name || b.Group == name {
+			return true
+		}
+	}
+	return false
 }
 
 // expandFileArgs joins args into the prompt, replacing any arg that starts with

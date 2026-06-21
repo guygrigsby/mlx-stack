@@ -68,13 +68,52 @@ func newReloadCmd() *cobra.Command {
 
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "status",
-		Aliases: []string{"list"},
-		Short:   "Show all backend state",
+		Use:   "status",
+		Short: "Detailed backend table (engine, model, url, pid, mem, timing)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return printStatus()
 		},
 	}
+}
+
+func newListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "Show slots, the models each can load, and which is loaded",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return printList()
+		},
+	}
+}
+
+// printList overlays config membership (what each slot can load) with the live
+// status snapshot (what's loaded). On -o json it emits the raw status body, the
+// same as `status`, so scripts have one shape to parse.
+func printList() error {
+	c := newClient()
+	cx, cancel := ctx()
+	defer cancel()
+	b, err := c.Get(cx, "/v1/status")
+	if err != nil {
+		return notRunning()
+	}
+	if outputJSON() {
+		fmt.Println(string(b))
+		return nil
+	}
+	var s statusJSON
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("parse status: %w", err)
+	}
+	cfg := loadCfg()
+	if cfg == nil {
+		// No readable config: fall back to the detailed table rather than an
+		// empty list.
+		renderStatus(os.Stdout, b)
+		return nil
+	}
+	renderList(os.Stdout, cfg.Backends, s)
+	return nil
 }
 
 func newHealthCmd() *cobra.Command {
