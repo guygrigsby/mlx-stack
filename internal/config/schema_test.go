@@ -152,8 +152,8 @@ func TestOffloadValidation(t *testing.T) {
 	// Present but missing external_root is an error.
 	c := &Config{
 		PythonBin: "/x", Router: Router{Port: 8080},
-		Backends:  []BackendSpec{{Name: "a", Mode: "external", URL: "http://x"}},
-		Offload:   &Offload{LocalBudgetBytes: 1},
+		Backends: []BackendSpec{{Name: "a", Mode: "external", URL: "http://x"}},
+		Offload:  &Offload{LocalBudgetBytes: 1},
 	}
 	if err := c.Validate(); err == nil {
 		t.Fatal("offload without external_root should error")
