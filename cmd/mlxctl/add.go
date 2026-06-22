@@ -36,6 +36,8 @@ func newAddCmd() *cobra.Command {
 	var (
 		name       string
 		engine     string
+		slot       string
+		warm       bool
 		mode       string
 		group      string
 		host       string
@@ -69,6 +71,15 @@ func newAddCmd() *cobra.Command {
 			modelDir, modelRef, err := resolveModelArg(arg, cfg, noDownload)
 			if err != nil {
 				return err
+			}
+
+			// Map the canonical flags onto the legacy mode/group buildSpec still
+			// speaks. --slot wins over --group; --warm forces an always-on slot.
+			if slot != "" {
+				group = slot
+			}
+			if warm {
+				mode = "persistent"
 			}
 
 			spec, err := buildSpec(modelDir, modelRef, name, engine, mode, group, host, port, def, draft, cfg)
@@ -140,11 +151,15 @@ func newAddCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", "", "backend name (default: sanitized last path segment)")
 	cmd.Flags().StringVar(&engine, "engine", "", "lm|vlm|embed|audio (default: auto-detect via config.json model_type)")
-	cmd.Flags().StringVar(&mode, "mode", "", "swap|persistent (default: swap for lm/vlm, persistent for embed/audio)")
-	cmd.Flags().StringVar(&group, "group", "", "swap group (default: chat for swap, name for persistent)")
+	cmd.Flags().StringVar(&slot, "slot", "", "share a slot with other models (default: chat for lm/vlm, its own name otherwise)")
+	cmd.Flags().BoolVar(&warm, "warm", false, "keep this model always-on (start at boot, respawn on crash)")
+	cmd.Flags().StringVar(&mode, "mode", "", "deprecated: use --warm; legacy swap|persistent")
+	cmd.Flags().StringVar(&group, "group", "", "deprecated: use --slot")
+	_ = cmd.Flags().MarkHidden("mode")
+	_ = cmd.Flags().MarkHidden("group")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host")
-	cmd.Flags().IntVar(&port, "port", 0, "upstream port (default: auto-allocated free high port; swap members inherit their group's)")
-	cmd.Flags().BoolVar(&def, "default", false, "mark as default member of its swap group")
+	cmd.Flags().IntVar(&port, "port", 0, "upstream port (default: auto-allocated; slot-mates share a port)")
+	cmd.Flags().BoolVar(&def, "default", false, "the model this slot loads when addressed by its slot name")
 	cmd.Flags().StringVar(&draft, "draft", "", "draft model path (engine=lm only)")
 	cmd.Flags().BoolVar(&noDownload, "no-download", false, "for HF args: do not pre-download; let mlx_lm fetch lazily")
 	cmd.Flags().BoolVar(&noReload, "no-reload", false, "don't hot-reload the running mlxd after writing config")

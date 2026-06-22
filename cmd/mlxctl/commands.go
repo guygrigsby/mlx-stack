@@ -136,9 +136,9 @@ func newHealthCmd() *cobra.Command {
 
 func newStartCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "start <name>",
+		Use:     "start <slot>",
 		Aliases: []string{"swap"},
-		Short:   "Start or load a backend; a swap member evicts its group's current one (group name loads the default member)",
+		Short:   "Load a slot (a slot name loads its default model; naming a slot-mate swaps to it)",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cx, cancel := ctx()
