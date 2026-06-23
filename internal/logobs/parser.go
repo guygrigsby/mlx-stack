@@ -15,6 +15,7 @@ const (
 	KindWatchdogArmed
 	KindWatchdogTrigger
 	KindStarting
+	KindProgress
 )
 
 type MemSnapshot struct {
@@ -38,6 +39,13 @@ type WatchdogEvent struct {
 	Active   int64
 }
 
+type Progress struct {
+	RequestID string
+	Tokens    int
+	TPS       float64
+	Max       int
+}
+
 type Event struct {
 	Raw      string
 	Worker   string
@@ -45,15 +53,17 @@ type Event struct {
 	Mem      MemSnapshot
 	Timing   Timing
 	Watchdog WatchdogEvent
+	Progress Progress
 }
 
 const prefix = "[mlx-launch] "
 
 var (
-	reMem    = regexp.MustCompile(`^mem: active=(\d+) cache=(\d+) peak=(\d+)`)
-	reTiming = regexp.MustCompile(`^req=(\S+) prompt=(\d+)t prefill=([\d.]+)ms@([\d.]+)tps decode=([\d.]+)ms@([\d.]+)tps`)
-	reWdArm  = regexp.MustCompile(`^WATCHDOG: armed\. baseline=(\d+) trigger=(\d+)`)
-	reWdTrig = regexp.MustCompile(`^WATCHDOG: active=(\d+) > trigger=(\d+)`)
+	reMem      = regexp.MustCompile(`^mem: active=(\d+) cache=(\d+) peak=(\d+)`)
+	reTiming   = regexp.MustCompile(`^req=(\S+) prompt=(\d+)t prefill=([\d.]+)ms@([\d.]+)tps decode=([\d.]+)ms@([\d.]+)tps`)
+	reProgress = regexp.MustCompile(`^req=(\S+) progress tokens=(\d+) tps=([\d.]+) max=(\d+)`)
+	reWdArm    = regexp.MustCompile(`^WATCHDOG: armed\. baseline=(\d+) trigger=(\d+)`)
+	reWdTrig   = regexp.MustCompile(`^WATCHDOG: active=(\d+) > trigger=(\d+)`)
 )
 
 func Parse(line string) (Event, bool) {
@@ -78,6 +88,14 @@ func Parse(line string) (Event, bool) {
 		ev.Timing.PrefillTPS, _ = strconv.ParseFloat(m[4], 64)
 		ev.Timing.DecodeMs, _ = strconv.ParseFloat(m[5], 64)
 		ev.Timing.DecodeTPS, _ = strconv.ParseFloat(m[6], 64)
+		return ev, true
+	}
+	if m := reProgress.FindStringSubmatch(body); m != nil {
+		ev.Kind = KindProgress
+		ev.Progress.RequestID = m[1]
+		ev.Progress.Tokens, _ = strconv.Atoi(m[2])
+		ev.Progress.TPS, _ = strconv.ParseFloat(m[3], 64)
+		ev.Progress.Max, _ = strconv.Atoi(m[4])
 		return ev, true
 	}
 	if m := reWdArm.FindStringSubmatch(body); m != nil {

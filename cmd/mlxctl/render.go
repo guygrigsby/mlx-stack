@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/guygrigsby/mlx-stack/internal/config"
 )
@@ -71,6 +72,13 @@ type workerObsJSON struct {
 		DecodeMs   float64 `json:"DecodeMs"`
 		DecodeTPS  float64 `json:"DecodeTPS"`
 	} `json:"latest_timing"`
+	LastTimingAt int64 `json:"last_timing_at"`
+	ActiveReq    *struct {
+		RequestID string  `json:"RequestID"`
+		Tokens    int     `json:"Tokens"`
+		TPS       float64 `json:"TPS"`
+		Max       int     `json:"Max"`
+	} `json:"active_req"`
 }
 
 type routerJSON struct {
@@ -83,6 +91,7 @@ type statusJSON struct {
 	Router           routerJSON               `json:"router"`
 	Backends         []backendStatusJSON      `json:"backends"`
 	Workers          map[string]workerObsJSON `json:"workers"`
+	Active           map[string]int           `json:"active"`
 	CacheUsedBytes   int64                    `json:"cache_used_bytes"`
 	CacheBudgetBytes int64                    `json:"cache_budget_bytes"`
 }
@@ -115,7 +124,7 @@ func renderStatus(w io.Writer, body []byte) {
 	if color {
 		runHdr = ansiDefault + runHdr + ansiReset
 	}
-	fmt.Fprintf(tw, "NAME\tSLOT\tTYPE\tKIND\tMODEL\tURL\t%s\tPID\tCURRENT\tTIER\tMEM(active/cache/peak)\tLAST TIMING\n", runHdr)
+	fmt.Fprintf(tw, "NAME\tSLOT\tTYPE\tKIND\tMODEL\t%s\tTIER\tMEM(active/cache/peak)\tACTIVITY\n", runHdr)
 	names := make([]string, 0, len(s.Backends))
 	idx := map[string]backendStatusJSON{}
 	for _, b := range s.Backends {
@@ -125,7 +134,8 @@ func renderStatus(w io.Writer, body []byte) {
 	sort.Strings(names)
 	for _, n := range names {
 		b := idx[n]
-		mem, tim := "-", "-"
+		mem, activity := "-", "-"
+		inFlight := s.Active[b.Name]
 		// Workers may be keyed by group-formatted name (e.g. chat[valkyrie]).
 		for wname, wob := range s.Workers {
 			if wname == b.Name || (b.CurrentName != "" && wname == fmt.Sprintf("%s[%s]", b.Group, b.CurrentName)) {
@@ -135,14 +145,31 @@ func renderStatus(w io.Writer, body []byte) {
 						humanBytes(wob.LatestMem.Cache),
 						humanBytes(wob.LatestMem.Peak))
 				}
-				if wob.LatestTiming != nil {
-					tim = fmt.Sprintf("req=%s prefill=%.0fms@%.1ftps decode=%.0fms@%.1ftps",
-						wob.LatestTiming.RequestID,
-						wob.LatestTiming.PrefillMs, wob.LatestTiming.PrefillTPS,
-						wob.LatestTiming.DecodeMs, wob.LatestTiming.DecodeTPS)
+				// Live decode progress takes priority over historical timing.
+				if wob.ActiveReq != nil {
+					ar := wob.ActiveReq
+					if ar.Max > 0 {
+						pct := ar.Tokens * 100 / ar.Max
+						activity = fmt.Sprintf("LIVE %.1ft/s  %d tok  %d%%", ar.TPS, ar.Tokens, pct)
+					} else {
+						activity = fmt.Sprintf("LIVE %.1ft/s  %d tok", ar.TPS, ar.Tokens)
+					}
+				} else if wob.LatestTiming != nil {
+					ago := ""
+					if wob.LastTimingAt > 0 {
+						d := time.Since(time.Unix(wob.LastTimingAt, 0)).Round(time.Second)
+						ago = fmt.Sprintf("  (%s ago)", d)
+					}
+					activity = fmt.Sprintf("%.1ft/s%s", wob.LatestTiming.DecodeTPS, ago)
+				} else if inFlight > 0 {
+					activity = fmt.Sprintf("%d req", inFlight)
 				}
 				break
 			}
+		}
+		// For backends with no worker obs (audio/embed/external), fall back to in-flight count.
+		if activity == "-" && inFlight > 0 {
+			activity = fmt.Sprintf("%d req", inFlight)
 		}
 		// Run cell: ready=yes (green), loading=loading (yellow), unhealthy=
 		// wedged (red, loaded but not answering), stopped=no (red). Falls back
@@ -163,10 +190,6 @@ func renderStatus(w io.Writer, body []byte) {
 		if color {
 			running = rc + running + ansiReset
 		}
-		current := b.CurrentName
-		if current == "" {
-			current = "-"
-		}
 		// Slot is the addressable name; for a multi-model slot it groups the
 		// members, for warm/remote it equals the name.
 		slot := b.Group
@@ -178,8 +201,8 @@ func renderStatus(w io.Writer, body []byte) {
 		if tier == "" {
 			tier = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			b.Name, slot, slotType(b.Mode), kind, shortModel(b.Model), b.URL, running, b.PID, current, tier, mem, tim)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			b.Name, slot, slotType(b.Mode), kind, shortModel(b.Model), running, tier, mem, activity)
 	}
 	tw.Flush()
 
@@ -315,7 +338,10 @@ func shortModel(m string) string {
 		return "-"
 	}
 	if strings.HasPrefix(m, "/") {
-		return filepath.Base(m)
+		m = filepath.Base(m)
+	}
+	if len(m) > 28 {
+		return m[:27] + "…"
 	}
 	return m
 }

@@ -25,6 +25,9 @@ type Handlers struct {
 	// backends without a restart (additive). POST /v1/reload invokes it.
 	Reload func(context.Context) (ReloadResult, error)
 
+	// ActiveFunc, when set, returns a map of backend name → in-flight request count.
+	ActiveFunc func() map[string]int
+
 	// Offloader, when set, enables POST /v1/offload and /v1/pull.
 	Offloader Offloader
 
@@ -79,6 +82,7 @@ type StatusResponse struct {
 	Router           RouterInfo                    `json:"router"`
 	Backends         []BackendStatus               `json:"backends"`
 	Workers          map[string]obsstate.WorkerObs `json:"workers,omitempty"`
+	Active           map[string]int                `json:"active,omitempty"`
 	CacheUsedBytes   int64                         `json:"cache_used_bytes,omitempty"`
 	CacheBudgetBytes int64                         `json:"cache_budget_bytes,omitempty"`
 }
@@ -262,6 +266,9 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.ObsStore != nil {
 		resp.Workers = h.ObsStore.Snapshot()
+	}
+	if h.ActiveFunc != nil {
+		resp.Active = h.ActiveFunc()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

@@ -179,10 +179,11 @@ func newRunCmd() *cobra.Command {
 			}
 
 			handlers := &admin.Handlers{
-				Config:   cfg,
-				Broker:   broker,
-				ObsStore: obsStore,
-				Reload:   live.reload,
+				Config:      cfg,
+				Broker:      broker,
+				ObsStore:    obsStore,
+				Reload:      live.reload,
+				ActiveFunc:  routerSrv.Active,
 			}
 			if offloadMgr != nil {
 				handlers.Offloader = offloadMgr

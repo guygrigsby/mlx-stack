@@ -14,6 +14,8 @@ type WorkerObs struct {
 	Name         string                `json:"name"`
 	LatestMem    *logobs.MemSnapshot   `json:"latest_mem,omitempty"`
 	LatestTiming *logobs.Timing        `json:"latest_timing,omitempty"`
+	LastTimingAt int64                 `json:"last_timing_at,omitempty"` // unix seconds
+	ActiveReq    *logobs.Progress      `json:"active_req,omitempty"`
 	LastWatchdog *logobs.WatchdogEvent `json:"last_watchdog,omitempty"`
 	RecentTiming []logobs.Timing       `json:"recent_timing,omitempty"`
 	Updated      time.Time             `json:"updated"`
@@ -48,10 +50,15 @@ func (s *Store) Apply(ev logobs.Event) {
 	case logobs.KindTiming:
 		t := ev.Timing
 		w.LatestTiming = &t
+		w.LastTimingAt = now.Unix()
+		w.ActiveReq = nil // request complete
 		w.RecentTiming = append(w.RecentTiming, t)
 		if len(w.RecentTiming) > ringSize {
 			w.RecentTiming = w.RecentTiming[len(w.RecentTiming)-ringSize:]
 		}
+	case logobs.KindProgress:
+		p := ev.Progress
+		w.ActiveReq = &p
 	case logobs.KindWatchdogArmed, logobs.KindWatchdogTrigger:
 		wd := ev.Watchdog
 		w.LastWatchdog = &wd

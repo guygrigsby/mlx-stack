@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync"
+	"sync/atomic"
 
 	"github.com/guygrigsby/mlx-stack/internal/config"
 )
@@ -17,13 +19,40 @@ type ServerOpts struct {
 type Server struct {
 	cfg      *config.Config
 	registry *Registry
+	mu       sync.Mutex
+	active   map[string]*atomic.Int32 // backend name → in-flight count
 }
 
 func NewServer(opts ServerOpts) *Server {
 	return &Server{
 		cfg:      opts.Config,
 		registry: opts.Registry,
+		active:   map[string]*atomic.Int32{},
 	}
+}
+
+func (s *Server) counter(name string) *atomic.Int32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.active[name]
+	if !ok {
+		c = new(atomic.Int32)
+		s.active[name] = c
+	}
+	return c
+}
+
+// Active returns a snapshot of backends with at least one in-flight request.
+func (s *Server) Active() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]int{}
+	for name, c := range s.active {
+		if n := int(c.Load()); n > 0 {
+			out[name] = n
+		}
+	}
+	return out
 }
 
 func (s *Server) Handler() http.Handler {
@@ -78,5 +107,9 @@ func (s *Server) handleProxyByModel(w http.ResponseWriter, r *http.Request) {
 	if upstream == "" {
 		upstream = model // audio: multiplex on the per-request model
 	}
+
+	c := s.counter(b.Name())
+	c.Add(1)
+	defer c.Add(-1)
 	_ = ProxyJSON(w, r, b.BaseURL(), upstream)
 }
