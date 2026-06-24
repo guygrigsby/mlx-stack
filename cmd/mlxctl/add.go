@@ -125,8 +125,12 @@ func newAddCmd() *cobra.Command {
 			if autoPort {
 				portNote = " (auto)"
 			}
-			fmt.Printf("%s [[backend]] name=%q engine=%s type=%s port=%d%s → %s\n",
-				verb, spec.Name, spec.Engine, slotType(spec.Mode), spec.Port, portNote, cfgPath)
+			group := spec.Group
+			if group == "" {
+				group = spec.Name
+			}
+			fmt.Printf("%s [[backend]] name=%q engine=%s group=%s port=%d%s → %s\n",
+				verb, spec.Name, spec.Engine, group, spec.Port, portNote, cfgPath)
 
 			// Hot-reload the running daemon so the backend is usable now. Best
 			// effort: a down daemon must never fail the config write. Reload is

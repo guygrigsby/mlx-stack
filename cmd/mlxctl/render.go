@@ -124,7 +124,7 @@ func renderStatus(w io.Writer, body []byte) {
 	if color {
 		runHdr = ansiDefault + runHdr + ansiReset
 	}
-	fmt.Fprintf(tw, "NAME\tSLOT\tTYPE\tKIND\tMODEL\t%s\tTIER\tMEM(active/cache/peak)\tACTIVITY\n", runHdr)
+	fmt.Fprintf(tw, "MODEL\tGROUP\tMODE\t%s\tTIER\tMEM(active/cache/peak)\tACTIVITY\n", runHdr)
 	names := make([]string, 0, len(s.Backends))
 	idx := map[string]backendStatusJSON{}
 	for _, b := range s.Backends {
@@ -190,19 +190,19 @@ func renderStatus(w io.Writer, body []byte) {
 		if color {
 			running = rc + running + ansiReset
 		}
-		// Slot is the addressable name; for a multi-model slot it groups the
-		// members, for warm/remote it equals the name.
-		slot := b.Group
-		if slot == "" {
-			slot = b.Name
+		// Group is the addressable name; for a multi-model group it names the
+		// swap set, otherwise it equals the backend name.
+		group := b.Group
+		if group == "" {
+			group = b.Name
 		}
-		kind := kindWord(b.Engine)
+		mode := kindWord(b.Engine)
 		tier := b.Tier
 		if tier == "" {
 			tier = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			b.Name, slot, slotType(b.Mode), kind, shortModel(b.Model), running, tier, mem, activity)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			shortModel(b.Model), group, mode, running, tier, mem, activity)
 	}
 	tw.Flush()
 
@@ -225,20 +225,6 @@ func kindWord(engine string) string {
 		return "embeddings"
 	default:
 		return "-"
-	}
-}
-
-// slotType translates an internal mode to the user word for a slot's nature.
-func slotType(mode string) string {
-	switch mode {
-	case "swap":
-		return "slot"
-	case "persistent":
-		return "warm"
-	case "external":
-		return "remote"
-	default:
-		return mode
 	}
 }
 
@@ -305,7 +291,7 @@ func renderList(w io.Writer, specs []config.BackendSpec, s statusJSON) {
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "SLOT / MODEL\tKIND\tSTATE")
+	fmt.Fprintln(tw, "GROUP / MODEL\tMODE\tSTATE")
 	for _, slot := range order {
 		members := bySlot[slot]
 		live := st[slot]
@@ -314,12 +300,12 @@ func renderList(w io.Writer, specs []config.BackendSpec, s statusJSON) {
 			fmt.Fprintf(tw, "%s\t%s\t%s\n", slot, kindWord(m.Engine), stateColor(slotState(m, live), color))
 			continue
 		}
-		// Multi-model slot: header line then one indented row per candidate.
+		// Multi-model group: header line then one indented row per candidate.
 		loaded := 0
 		if live.CurrentName != "" {
 			loaded = 1
 		}
-		fmt.Fprintf(tw, "%s\tslot\t%d of %d loaded\n", slot, loaded, len(members))
+		fmt.Fprintf(tw, "%s\t-\t%d of %d loaded\n", slot, loaded, len(members))
 		for _, m := range members {
 			state, glyph := "idle", "○"
 			if m.Name == live.CurrentName {

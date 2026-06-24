@@ -9,7 +9,7 @@ import (
 func TestRenderStatus_Basic(t *testing.T) {
 	body := []byte(`{
 		"backends": [
-			{"name":"chat","group":"chat","mode":"swap","engine":"lm","url":"http://x:1234","running":true,"pid":100,"current_name":"valkyrie"},
+			{"name":"chat","group":"chat","mode":"swap","engine":"lm","model":"valkyrie","url":"http://x:1234","running":true,"pid":100,"current_name":"valkyrie"},
 			{"name":"embed","group":"embed","mode":"persistent","engine":"embed","url":"http://x:1236","running":true,"pid":200}
 		]
 	}`)
