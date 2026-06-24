@@ -105,30 +105,6 @@ func (bd *backendBuilder) newGroup(name string, members []config.BackendSpec) *s
 	})
 }
 
-func (bd *backendBuilder) newPersistent(spec config.BackendSpec) *supervisor.Persistent {
-	return supervisor.NewPersistent(supervisor.PersistentOpts{
-		Name:          spec.Name,
-		Engine:        spec.Engine,
-		Host:          spec.Host,
-		Port:          spec.Port,
-		UpstreamModel: spec.Model,
-		Model:         spec.Model,
-		DraftModel:    spec.DraftModel,
-		Args:          launcherArgs(spec),
-		BeforeLoad:    offloadBeforeLoad(bd.offload),
-		WorkerFactory: func(args []string) *supervisor.Worker {
-			return supervisor.New(supervisor.WorkerSpec{
-				Name:    spec.Name,
-				Command: bd.pythonBin,
-				Args:    args,
-				Env:     backendEnv(spec, bd.defaults, bd.shimDir),
-				Broker:  bd.broker,
-				Logger:  bd.logger,
-			})
-		},
-	})
-}
-
 // liveState owns the mutable backend set. A hot reload grows it from the admin
 // goroutine while requests read it; shutdown drains it. All mutation and the
 // shutdown read go through mu.
@@ -141,10 +117,9 @@ type liveState struct {
 	cfgPath  string
 	logger   *slog.Logger
 
-	groups      map[string]*supervisor.Group
-	persistents []*supervisor.Persistent
-	backends    []bk.Backend
-	aliases     map[string]string
+	groups   map[string]*supervisor.Group
+	backends []bk.Backend
+	aliases  map[string]string
 }
 
 // diffNewBackends splits cfg's backends into those not yet known by name (to
@@ -189,12 +164,6 @@ func (ls *liveState) reload(_ context.Context) (admin.ReloadResult, error) {
 			ls.registry.Register(ext)
 			ls.backends = append(ls.backends, ext)
 			ls.logger.Info("hot-loaded external backend", "name", spec.Name, "url", spec.URL)
-		case "persistent":
-			pb := ls.builder.newPersistent(spec)
-			ls.registry.Register(pb)
-			ls.backends = append(ls.backends, pb)
-			ls.persistents = append(ls.persistents, pb)
-			ls.logger.Info("hot-loaded persistent backend (lazy)", "name", spec.Name, "url", pb.BaseURL())
 		case "swap":
 			if g, ok := ls.groups[spec.Group]; ok {
 				added, mismatch := g.AddMember(spec)
@@ -246,8 +215,5 @@ func (ls *liveState) stopAll(ctx context.Context) {
 	defer ls.mu.Unlock()
 	for _, g := range ls.groups {
 		_ = g.Stop(ctx)
-	}
-	for _, p := range ls.persistents {
-		_ = p.Stop(ctx)
 	}
 }

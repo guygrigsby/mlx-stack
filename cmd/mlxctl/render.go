@@ -229,25 +229,19 @@ func kindWord(engine string) string {
 }
 
 // slotState is the one-word live state of a single-model slot, in user
-// vocabulary: remote, warm, loaded, loading, wedged, or idle.
+// vocabulary: remote, loaded, loading, wedged, or idle.
 func slotState(sp config.BackendSpec, live backendStatusJSON) string {
 	if sp.Remote {
 		return "remote"
 	}
 	switch live.State {
 	case "ready":
-		if sp.Warm {
-			return "warm"
-		}
 		return "loaded"
 	case "loading":
 		return "loading"
 	case "unhealthy":
 		return "wedged"
 	default:
-		if sp.Warm {
-			return "warm·stopped"
-		}
 		return "idle"
 	}
 }
@@ -258,11 +252,11 @@ func stateColor(word string, color bool) string {
 		return word
 	}
 	switch word {
-	case "loaded", "warm":
+	case "loaded":
 		return ansiGreen + word + ansiReset
 	case "loading":
 		return ansiYellow + word + ansiReset
-	case "wedged", "warm·stopped":
+	case "wedged":
 		return ansiRed + word + ansiReset
 	default:
 		return word

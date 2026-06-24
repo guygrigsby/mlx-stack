@@ -25,12 +25,14 @@ func newConfigCmd() *cobra.Command {
 var (
 	reMode  = regexp.MustCompile(`^(\s*)mode\s*=\s*["'](\w+)["']\s*$`)
 	reGroup = regexp.MustCompile(`^(\s*)group(\s*)=`)
+	reWarm  = regexp.MustCompile(`^\s*warm\s*=\s*true\s*$`)
 )
 
 // migrateConfigLines rewrites legacy mode/group lines to the slot vocabulary.
 // It is line-local on purpose: comments, sub-tables, and every other field are
-// preserved byte-for-byte. mode="swap" drops (lazy slot is the default),
-// "persistent"->warm, "external"->remote, and the group key becomes slot.
+// preserved byte-for-byte. mode="swap"/"persistent" drop (every backend is a
+// lazy slot now), "external"->remote, the group key becomes slot, and stale
+// warm=true lines are dropped.
 func migrateConfigLines(src string) (string, bool) {
 	lines := strings.Split(src, "\n")
 	out := make([]string, 0, len(lines))
@@ -38,11 +40,7 @@ func migrateConfigLines(src string) (string, bool) {
 	for _, l := range lines {
 		if m := reMode.FindStringSubmatch(l); m != nil {
 			switch indent, val := m[1], m[2]; val {
-			case "swap":
-				changed = true
-				continue
-			case "persistent":
-				out = append(out, indent+"warm   = true")
+			case "swap", "persistent":
 				changed = true
 				continue
 			case "external":
@@ -51,6 +49,10 @@ func migrateConfigLines(src string) (string, bool) {
 				continue
 			}
 			out = append(out, l) // unknown mode value: leave it
+			continue
+		}
+		if reWarm.MatchString(l) {
+			changed = true
 			continue
 		}
 		if reGroup.MatchString(l) {

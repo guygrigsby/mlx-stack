@@ -6,6 +6,5 @@ import (
 
 var (
 	_ backend.Backend = (*Group)(nil)
-	_ backend.Backend = (*Persistent)(nil)
 	_ backend.Backend = (*External)(nil)
 )

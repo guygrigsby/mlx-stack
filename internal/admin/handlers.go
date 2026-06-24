@@ -103,12 +103,6 @@ type currentNameAccessor interface {
 	Current() string
 }
 
-// phaseAccessor lets us read a backend's load phase ("stopped"/"loading"/
-// "ready") when it has one (Persistent). Others fall back to Running().
-type phaseAccessor interface {
-	Phase() string
-}
-
 // readinessChecker lets status confirm a backend the supervisor believes is
 // loaded can actually serve right now. A backend that wedges after loading
 // still reports Running()==true forever (the load-time probe never re-runs),
@@ -221,9 +215,7 @@ func (h *Handlers) status(w http.ResponseWriter, r *http.Request) {
 			Model:   b.UpstreamModel(),
 			PID:     b.PID(),
 		}
-		if ph, ok := b.(phaseAccessor); ok {
-			s.State = ph.Phase()
-		} else if b.Running() {
+		if b.Running() {
 			s.State = "ready"
 		} else {
 			s.State = "stopped"

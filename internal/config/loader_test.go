@@ -235,9 +235,9 @@ url    = "http://other:8080"
 	if v := by["valkyrie"]; v.Mode != "swap" || v.Group != "chat" || v.Slot != "chat" {
 		t.Errorf("valkyrie: mode=%q group=%q slot=%q", v.Mode, v.Group, v.Slot)
 	}
-	// embed engine is inherently a singleton -> warm/persistent
-	if e := by["embed"]; !e.Warm || e.Mode != "persistent" {
-		t.Errorf("embed: warm=%v mode=%q", e.Warm, e.Mode)
+	// embed is a singleton -> lazy swap slot of one named after itself
+	if e := by["embed"]; e.Mode != "swap" || e.Group != "embed" || e.Slot != "embed" {
+		t.Errorf("embed: mode=%q group=%q slot=%q", e.Mode, e.Group, e.Slot)
 	}
 	// bare lm with no slot -> lazy slot of one named after itself
 	if co := by["coder"]; co.Mode != "swap" || co.Group != "coder" || co.Slot != "coder" {
@@ -273,8 +273,8 @@ model  = "/m/qwen"
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	// legacy persistent should surface as warm in the new vocabulary
-	if b := c.Backends[0]; !b.Warm || b.Slot != "qwen-tags" {
-		t.Errorf("legacy persistent: warm=%v slot=%q", b.Warm, b.Slot)
+	// legacy persistent collapses into a lazy swap slot of one
+	if b := c.Backends[0]; b.Mode != "swap" || b.Slot != "qwen-tags" {
+		t.Errorf("legacy persistent: mode=%q slot=%q", b.Mode, b.Slot)
 	}
 }

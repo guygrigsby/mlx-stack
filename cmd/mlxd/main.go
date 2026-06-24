@@ -105,19 +105,7 @@ func newRunCmd() *cobra.Command {
 				backends = append(backends, g)
 			}
 
-			// 2. Persistents.
-			var persistents []*supervisor.Persistent
-			for _, spec := range cfg.Persistents() {
-				pb := builder.newPersistent(spec)
-				// Don't spawn at daemon start. Persistent backends load lazily:
-				// the router calls EnsureLoaded on the first request, or load
-				// them up front with `mlxctl start <name>`.
-				logger.Info("persistent backend registered (lazy)", "name", spec.Name, "url", pb.BaseURL())
-				persistents = append(persistents, pb)
-				backends = append(backends, pb)
-			}
-
-			// 3. Externals.
+			// 2. Externals.
 			for _, e := range cfg.Externals() {
 				ext := supervisor.NewExternal(e.Name, e.URL, e.UpstreamModel)
 				backends = append(backends, ext)
@@ -151,14 +139,13 @@ func newRunCmd() *cobra.Command {
 			// shutdown drains. Both the admin reload handler and the shutdown
 			// path go through it under its lock.
 			live := &liveState{
-				builder:     builder,
-				registry:    registry,
-				cfgPath:     cfgPath,
-				groups:      groupBackends,
-				persistents: persistents,
-				backends:    backends,
-				aliases:     aliases,
-				logger:      logger,
+				builder:  builder,
+				registry: registry,
+				cfgPath:  cfgPath,
+				groups:   groupBackends,
+				backends: backends,
+				aliases:  aliases,
+				logger:   logger,
 			}
 
 			// Pin currently-loaded models so offload never evicts a model that
@@ -179,11 +166,11 @@ func newRunCmd() *cobra.Command {
 			}
 
 			handlers := &admin.Handlers{
-				Config:      cfg,
-				Broker:      broker,
-				ObsStore:    obsStore,
-				Reload:      live.reload,
-				ActiveFunc:  routerSrv.Active,
+				Config:     cfg,
+				Broker:     broker,
+				ObsStore:   obsStore,
+				Reload:     live.reload,
+				ActiveFunc: routerSrv.Active,
 			}
 			if offloadMgr != nil {
 				handlers.Offloader = offloadMgr

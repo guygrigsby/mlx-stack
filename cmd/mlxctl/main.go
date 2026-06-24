@@ -26,8 +26,8 @@ func newRootCmd() *cobra.Command {
 		Short: "Control mlxd: list slots, send messages, manage models",
 		Long: `mlxctl controls mlxd, the local MLX model daemon.
 
-Every model has a name. Talk to it: mlxctl chat <name> "...". Models are either
-always-on (warm) or share a slot (one model per slot is resident at a time; mlxd
+Every model has a name. Talk to it: mlxctl chat <name> "...". Models share a
+slot (one model per slot is resident at a time; mlxd loads on first request and
 swaps automatically when you address a different one). mlxctl list shows them.
 
 Common workflow:

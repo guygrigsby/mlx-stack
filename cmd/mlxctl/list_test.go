@@ -12,12 +12,12 @@ func TestRenderList(t *testing.T) {
 	specs := []config.BackendSpec{
 		{Name: "valkyrie", Engine: "lm", Slot: "chat"},
 		{Name: "scout", Engine: "vlm", Slot: "chat"},
-		{Name: "embed", Engine: "embed", Slot: "embed", Warm: true},
+		{Name: "embed", Engine: "embed", Slot: "embed"},
 		{Name: "remote-gpt", Slot: "remote-gpt", Remote: true},
 	}
 	s := statusJSON{Backends: []backendStatusJSON{
 		{Name: "chat", Mode: "swap", CurrentName: "valkyrie", State: "ready"},
-		{Name: "embed", Mode: "persistent", State: "ready"},
+		{Name: "embed", Mode: "swap", State: "ready"},
 		{Name: "remote-gpt", Mode: "external", Running: true},
 	}}
 	var buf bytes.Buffer
@@ -38,8 +38,8 @@ func TestRenderList(t *testing.T) {
 	if !strings.Contains(out, "vision") || !strings.Contains(out, "embeddings") {
 		t.Errorf("engine words not humanized:\n%s", out)
 	}
-	// warm + remote single-model slots
-	if !strings.Contains(out, "warm") || !strings.Contains(out, "remote") {
-		t.Errorf("warm/remote states missing:\n%s", out)
+	// singleton + remote single-model slots
+	if !strings.Contains(out, "embed") || !strings.Contains(out, "remote") {
+		t.Errorf("singleton/remote states missing:\n%s", out)
 	}
 }

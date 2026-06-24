@@ -47,7 +47,7 @@ url  = "http://other:8080"
 			t.Errorf("legacy key survived: %q", l)
 		}
 	}
-	for _, want := range []string{`slot`, "warm   = true", "remote = true", "# Chat slot.", `model  = "/m/valkyrie"`} {
+	for _, want := range []string{`slot`, "remote = true", "# Chat slot.", `model  = "/m/valkyrie"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}

@@ -37,7 +37,6 @@ func newAddCmd() *cobra.Command {
 		name       string
 		engine     string
 		slot       string
-		warm       bool
 		mode       string
 		group      string
 		host       string
@@ -74,12 +73,9 @@ func newAddCmd() *cobra.Command {
 			}
 
 			// Map the canonical flags onto the legacy mode/group buildSpec still
-			// speaks. --slot wins over --group; --warm forces an always-on slot.
+			// speaks. --slot wins over --group.
 			if slot != "" {
 				group = slot
-			}
-			if warm {
-				mode = "persistent"
 			}
 
 			spec, err := buildSpec(modelDir, modelRef, name, engine, mode, group, host, port, def, draft, cfg)
@@ -156,8 +152,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "backend name (default: sanitized last path segment)")
 	cmd.Flags().StringVar(&engine, "engine", "", "lm|vlm|embed|audio (default: auto-detect via config.json model_type)")
 	cmd.Flags().StringVar(&slot, "slot", "", "share a slot with other models (default: chat for lm/vlm, its own name otherwise)")
-	cmd.Flags().BoolVar(&warm, "warm", false, "keep this model always-on (start at boot, respawn on crash)")
-	cmd.Flags().StringVar(&mode, "mode", "", "deprecated: use --warm; legacy swap|persistent")
+	cmd.Flags().StringVar(&mode, "mode", "", "deprecated: legacy swap|external (everything is a lazy slot now)")
 	cmd.Flags().StringVar(&group, "group", "", "deprecated: use --slot")
 	_ = cmd.Flags().MarkHidden("mode")
 	_ = cmd.Flags().MarkHidden("group")
@@ -462,18 +457,14 @@ func buildSpec(modelDir, modelRef, name, engine, mode, group, host string, port 
 		engine = "lm" // best-effort default
 	}
 	if mode == "" {
-		switch engine {
-		case "lm", "vlm":
-			mode = "swap"
-		default:
-			mode = "persistent"
-		}
+		mode = "swap" // everything lazy-loads through the slot path
 	}
 	if group == "" {
-		if mode == "swap" {
-			group = "chat"
-		} else {
-			group = name
+		switch engine {
+		case "lm", "vlm":
+			group = "chat" // chat models share the default chat slot
+		default:
+			group = name // embed/audio are a slot of one
 		}
 	}
 	if port == 0 {
@@ -576,20 +567,13 @@ func renderBackend(b config.BackendSpec) string {
 	sb.WriteString("[[backend]]\n")
 	sb.WriteString(fmt.Sprintf("name   = %q\n", b.Name))
 	sb.WriteString(fmt.Sprintf("engine = %q\n", b.Engine))
-	// Canonical slot vocabulary (see ADR 0001). slot is emitted only when this
-	// model shares a slot with others; warm marks an always-on lm/vlm (embed/
-	// audio are warm implicitly).
-	switch b.Mode {
-	case "persistent":
-		if b.Engine == "lm" || b.Engine == "vlm" {
-			sb.WriteString("warm   = true\n")
-		}
-	case "external":
+	// Canonical slot vocabulary (see ADR 0001/0002). remote proxies an external
+	// URL; otherwise it's a lazy slot, and slot= is emitted only when this model
+	// shares a slot with others.
+	if b.Mode == "external" {
 		sb.WriteString("remote = true\n")
-	default:
-		if b.Group != "" && b.Group != b.Name {
-			sb.WriteString(fmt.Sprintf("slot   = %q\n", b.Group))
-		}
+	} else if b.Group != "" && b.Group != b.Name {
+		sb.WriteString(fmt.Sprintf("slot   = %q\n", b.Group))
 	}
 	if b.Default {
 		sb.WriteString("default = true\n")

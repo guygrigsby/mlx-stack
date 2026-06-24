@@ -23,8 +23,8 @@ func TestDiffNewBackends(t *testing.T) {
 	cfg := &config.Config{Backends: []config.BackendSpec{
 		{Name: "valkyrie", Mode: "swap", Group: "chat"}, // known -> skip
 		{Name: "scout", Mode: "swap", Group: "chat"},    // new member of existing group
-		{Name: "newp", Mode: "persistent"},              // new persistent
-		{Name: "embed", Mode: "persistent"},             // known -> skip
+		{Name: "newp", Mode: "swap", Group: "newp"},     // new singleton
+		{Name: "embed", Mode: "swap", Group: "embed"},   // known -> skip
 	}}
 	add, skip := diffNewBackends(known, cfg)
 	if len(add) != 2 || add[0].Name != "scout" || add[1].Name != "newp" {
@@ -55,15 +55,14 @@ func buildLiveForReloadTest(t *testing.T, cfgPath string) *liveState {
 	h.SetState(backends, aliases)
 
 	return &liveState{
-		builder:     builder,
-		registry:    registry,
-		admin:       h,
-		cfgPath:     cfgPath,
-		logger:      logger,
-		groups:      map[string]*supervisor.Group{"chat": chat},
-		persistents: nil,
-		backends:    backends,
-		aliases:     aliases,
+		builder:  builder,
+		registry: registry,
+		admin:    h,
+		cfgPath:  cfgPath,
+		logger:   logger,
+		groups:   map[string]*supervisor.Group{"chat": chat},
+		backends: backends,
+		aliases:  aliases,
 	}
 }
 
@@ -122,11 +121,12 @@ model  = "/m/newp"
 			t.Errorf("%q not registered after reload", n)
 		}
 	}
-	// scout joined the existing chat group rather than creating a new one.
-	if len(live.groups) != 1 {
-		t.Errorf("want 1 group (scout joins chat), got %d", len(live.groups))
+	// scout joined the existing chat group; newp (a singleton) became its own
+	// group of one -> two groups total.
+	if len(live.groups) != 2 {
+		t.Errorf("want 2 groups (chat + newp), got %d", len(live.groups))
 	}
-	// The new persistent shows in the admin status view.
+	// The new singleton shows in the admin status view.
 	if !slices.Contains(adminNames(live.admin), "newp") {
 		t.Error("newp missing from admin status after reload")
 	}

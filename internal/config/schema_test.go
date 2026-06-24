@@ -10,7 +10,7 @@ func minCfg() *Config {
 		PythonBin: "/usr/bin/python",
 		Router:    Router{Host: "127.0.0.1", Port: 1230},
 		Backends: []BackendSpec{
-			{Name: "embed", Engine: "embed", Mode: "persistent", Host: "127.0.0.1", Port: 1236, Model: "/m"},
+			{Name: "embed", Engine: "embed", Mode: "swap", Group: "embed", Host: "127.0.0.1", Port: 1236, Model: "/m"},
 		},
 	}
 }
@@ -105,17 +105,17 @@ func TestValidate_ExternalOK(t *testing.T) {
 	}
 }
 
-func TestValidate_AudioPersistentNoModelOK(t *testing.T) {
+func TestValidate_AudioNoModelOK(t *testing.T) {
 	c := minCfg()
-	c.Backends = append(c.Backends, BackendSpec{Name: "tts", Engine: "audio", Mode: "persistent", Host: "127.0.0.1", Port: 1237})
+	c.Backends = append(c.Backends, BackendSpec{Name: "tts", Engine: "audio", Mode: "swap", Group: "tts", Host: "127.0.0.1", Port: 1237})
 	if err := c.Validate(); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 }
 
-func TestValidate_PersistentLmRequiresModel(t *testing.T) {
+func TestValidate_LmRequiresModel(t *testing.T) {
 	c := minCfg()
-	c.Backends = append(c.Backends, BackendSpec{Name: "x", Engine: "lm", Mode: "persistent", Host: "127.0.0.1", Port: 1238})
+	c.Backends = append(c.Backends, BackendSpec{Name: "x", Engine: "lm", Mode: "swap", Group: "x", Host: "127.0.0.1", Port: 1238})
 	err := c.Validate()
 	if err == nil || !strings.Contains(err.Error(), "model") {
 		t.Fatalf("want model error: %v", err)
@@ -176,7 +176,7 @@ func TestBackendsByGroup(t *testing.T) {
 		Backends: []BackendSpec{
 			{Name: "a", Mode: "swap", Group: "chat"},
 			{Name: "b", Mode: "swap", Group: "chat"},
-			{Name: "c", Mode: "persistent"},
+			{Name: "c", Mode: "external"},
 		},
 	}
 	groups := c.BackendsByGroup()
@@ -184,6 +184,6 @@ func TestBackendsByGroup(t *testing.T) {
 		t.Errorf("chat group: %d", len(groups["chat"]))
 	}
 	if _, ok := groups["c"]; ok {
-		t.Errorf("persistent backend should not appear in groups")
+		t.Errorf("external backend should not appear in groups")
 	}
 }
